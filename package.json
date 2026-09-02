@@ -1,0 +1,22 @@
+{
+  "name": "bazaarlink-radar",
+  "version": "0.2.0",
+  "description": "BazaarLink Radar —— 基于 BazaarLink Probe 的中转站发现工具：命令行 + 本地按需加载镜像 + 数据站。",
+  "type": "module",
+  "bin": {
+    "bl-radar": "src/cli.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/cli.mjs",
+    "serve": "node src/cli.mjs serve",
+    "platform": "node src/cli.mjs platform",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "fastify": "^5.12.1"
+  },
+  "license": "MIT"
+}

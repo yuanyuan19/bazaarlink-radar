@@ -1,0 +1,7 @@
+[Unit]
+Description=BazaarLink history ingest job
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bazaarlink
+ExecStart=/usr/bin/docker compose --profile jobs run --rm --no-deps ingest

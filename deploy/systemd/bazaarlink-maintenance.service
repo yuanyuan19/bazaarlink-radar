@@ -1,0 +1,8 @@
+[Unit]
+Description=BazaarLink database maintenance job
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bazaarlink
+ExecStart=/usr/bin/docker compose --profile jobs run --rm --no-deps maintenance cleanup
+ExecStart=/usr/bin/docker compose --profile jobs run --rm --no-deps maintenance backup

@@ -1,0 +1,57 @@
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx:/etc/nginx/conf.d:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      - platform
+      - mirror
+
+  platform:
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/cli.mjs", "platform", "--db", "/app/data/probe-history.sqlite"]
+    expose:
+      - "3000"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mirror:
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/cli.mjs", "serve", "--port", "8787"]
+    expose:
+      - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/__bl/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ingest:
+    build: .
+    profiles: ["jobs"]
+    restart: "no"
+    command: ["node", "src/cli.mjs", "ingest-history", "--once", "--if-due", "--db", "/app/data/probe-history.sqlite", "--no-csv"]
+    volumes:
+      - ./data:/app/data
+
+  maintenance:
+    build: .
+    profiles: ["jobs"]
+    restart: "no"
+    entrypoint: ["node", "src/cli.mjs", "maintenance"]
+    environment:
+      BACKUP_DIR: /app/backups
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
