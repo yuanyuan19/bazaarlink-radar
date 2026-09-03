@@ -257,9 +257,7 @@
     }
     readBand(findCard());
     setRunningVisibility();
-    var html = pagerHtml();
-    placePager("top", table, html);
-    placePager("bottom", table, html);
+    placePager("bottom", table, pagerHtml());
   }
 
   /* ---------- loading ---------- */
@@ -298,8 +296,10 @@
     if (page < 1 || page > last.pages || page === query.page) return;
     if (window.console && console.debug) console.debug("[bl-hist] goTo", page, "dispatch", !!dispatch);
     load({ q: query.q, band: query.band, page: page });
-    var top = document.querySelector('[data-bl-hist-pager="top"]');
-    if (top && top.getBoundingClientRect().top < 0) top.scrollIntoView({ block: "start" });
+    var table = findTable();
+    var card = findCard();
+    var anchor = card || table;
+    if (anchor && anchor.getBoundingClientRect().top < 0) anchor.scrollIntoView({ block: "start" });
   }
 
   function syncFilters() {
