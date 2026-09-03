@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -27,7 +27,8 @@ const NORMALIZED_SCHEMA = `
     raw_payload_ref TEXT,
     parser_version TEXT,
     ingested_at TEXT NOT NULL,
-    run_uuid TEXT
+    run_uuid TEXT,
+    is_public INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS probe_results (
     run_id TEXT PRIMARY KEY REFERENCES probe_runs(id) ON DELETE CASCADE,
@@ -169,8 +170,15 @@ export function migrateDb(db) {
   if (!columnExists(db, "probe_results", "total_probes")) {
     db.exec("ALTER TABLE probe_results ADD COLUMN total_probes INTEGER");
   }
+  // v9：公开来源标记落到 probe_runs 上，让列表的 COUNT / 过滤不再逐行查 run_sources。
+  // 索引以 ingested_at 为前导列，避免规划器在翻页时误选它而放弃 (created_at, id)。
+  if (!columnExists(db, "probe_runs", "is_public")) {
+    db.exec("ALTER TABLE probe_runs ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE probe_runs SET is_public = 1 WHERE id IN (SELECT run_id FROM run_sources WHERE source_type = 'public_history')");
+  }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_probe_runs_uuid ON probe_runs(run_uuid) WHERE run_uuid IS NOT NULL");
   db.exec("CREATE INDEX IF NOT EXISTS idx_probe_runs_created_id ON probe_runs(created_at DESC, id DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_probe_runs_ingested_public ON probe_runs(ingested_at, is_public)");
 
   if (current >= SCHEMA_VERSION) return current;
 

@@ -36,19 +36,20 @@ export function rekeyRun(db, fromId, toId) {
     db.prepare("UPDATE probe_runs SET run_uuid = NULL WHERE id = ?").run(String(fromId));
     db.prepare(`
       INSERT INTO probe_runs(id, base_url, site_id, claimed_model_id, created_at, completed_at,
-        source_report_url, raw_payload_ref, parser_version, ingested_at, run_uuid)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_report_url, raw_payload_ref, parser_version, ingested_at, run_uuid, is_public)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         base_url = COALESCE(probe_runs.base_url, excluded.base_url),
         site_id = COALESCE(probe_runs.site_id, excluded.site_id),
         claimed_model_id = COALESCE(probe_runs.claimed_model_id, excluded.claimed_model_id),
         created_at = COALESCE(probe_runs.created_at, excluded.created_at),
         completed_at = COALESCE(probe_runs.completed_at, excluded.completed_at),
-        run_uuid = COALESCE(probe_runs.run_uuid, excluded.run_uuid)
+        run_uuid = COALESCE(probe_runs.run_uuid, excluded.run_uuid),
+        is_public = MAX(probe_runs.is_public, excluded.is_public)
     `).run(
       String(toId), old.base_url, old.site_id, old.claimed_model_id, old.created_at, old.completed_at,
       `https://bazaarlink.ai/probe?runId=${encodeURIComponent(toId)}`, old.raw_payload_ref, old.parser_version, old.ingested_at,
-      old.run_uuid || (isRunUuid(fromId) ? String(fromId) : null),
+      old.run_uuid || (isRunUuid(fromId) ? String(fromId) : null), old.is_public ?? 0,
     );
     for (const table of CHILD_TABLES) {
       db.prepare(`UPDATE OR IGNORE ${table} SET run_id = ? WHERE run_id = ?`).run(String(toId), String(fromId));
@@ -80,7 +81,7 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
       completed_at = COALESCE(excluded.completed_at, probe_runs.completed_at),
       run_uuid = COALESCE(probe_runs.run_uuid, excluded.run_uuid)
   `).run(
-    String(item.id), item.baseUrl ?? null, siteId, item.modelId ?? null, item.createdAt ?? null,
+    String(item.id), item.baseUrl ?? null, siteId, item.modelId ?? null, item.createdAt ?? item.completedAt ?? now,
     item.completedAt ?? null, `https://bazaarlink.ai/probe?runId=${encodeURIComponent(item.id)}`, null, "history-v1", now, runUuid,
   );
 
@@ -130,6 +131,9 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
       VALUES(?, ?, ?, ?)
       ON CONFLICT(run_id, source_type) DO UPDATE SET last_seen_at = excluded.last_seen_at
     `).run(String(item.id), sourceType, now, now);
+    if (sourceType === "public_history") {
+      db.prepare("UPDATE probe_runs SET is_public = 1 WHERE id = ? AND is_public = 0").run(String(item.id));
+    }
   }
   return true;
 }

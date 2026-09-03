@@ -52,9 +52,7 @@ const JOINS = `
 `;
 
 function buildWhere({ q, band }) {
-  const conditions = [
-    "EXISTS (SELECT 1 FROM run_sources src WHERE src.run_id = pr.id AND src.source_type = 'public_history')",
-  ];
+  const conditions = ["pr.is_public = 1"];
   const params = [];
   if (q) {
     conditions.push("(pr.base_url LIKE ? ESCAPE '\\' OR COALESCE(pr.claimed_model_id, '') LIKE ? ESCAPE '\\')");
@@ -82,8 +80,10 @@ export function historyPage(db, options = {}) {
   const snapshotWhere = `WHERE ${[...conditions, "pr.ingested_at <= ?"].join(" AND ")}`;
   const newerWhere = `WHERE ${[...conditions, "pr.ingested_at > ?"].join(" AND ")}`;
 
-  const total = db.prepare(`SELECT COUNT(*) AS n ${JOINS} ${snapshotWhere}`).get(...params, asOf).n;
-  const newerCount = db.prepare(`SELECT COUNT(*) AS n ${JOINS} ${newerWhere}`).get(...params, asOf).n;
+  // 无筛选时 COUNT 只碰 probe_runs，走 (ingested_at, is_public) 覆盖索引；有筛选才 JOIN。
+  const countJoins = q || bandClause(band) ? JOINS : "FROM probe_runs pr";
+  const total = db.prepare(`SELECT COUNT(*) AS n ${countJoins} ${snapshotWhere}`).get(...params, asOf).n;
+  const newerCount = db.prepare(`SELECT COUNT(*) AS n ${countJoins} ${newerWhere}`).get(...params, asOf).n;
   const pages = Math.max(1, Math.ceil(total / limit));
   const page = Math.min(wanted, pages);
 
@@ -93,7 +93,7 @@ export function historyPage(db, options = {}) {
            rr.identity_only, rr.total_probes, ${SCORE} AS score_100, ms.request_model
     ${JOINS}
     ${snapshotWhere}
-    ORDER BY COALESCE(pr.created_at, '') DESC, pr.id DESC
+    ORDER BY pr.created_at DESC, pr.id DESC
     LIMIT ? OFFSET ?
   `).all(...params, asOf, limit, (page - 1) * limit);
 
