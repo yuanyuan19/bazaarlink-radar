@@ -21,6 +21,19 @@
     return raw + (raw.indexOf("?") >= 0 ? "&" : "?") + "limit=24";
   }
 
+  function rewriteHistoryUrl(url) {
+    var raw = String(url || "");
+    var path = raw.split("?")[0];
+    if (!/\/api\/probe\/history\/?$/.test(path)) return raw;
+    if (/[?&]limit=/.test(raw)) return raw;
+    return raw + (raw.indexOf("?") >= 0 ? "&" : "?") + "limit=50";
+  }
+
+  function rewritePerfUrl(url) {
+    var next = rewriteVerdictsUrl(url);
+    return rewriteHistoryUrl(next);
+  }
+
   /* ---------- 1. stagger same-origin API GETs ---------- */
 
   var active = 0;
@@ -76,7 +89,7 @@
     window.__blNativeFetch = nativeFetch;
     window.fetch = function (input, init) {
       var url = typeof input === "string" ? input : (input && input.url) || "";
-      var next = rewriteVerdictsUrl(url);
+      var next = rewritePerfUrl(url);
       if (next !== url) {
         if (typeof input === "string") input = next;
         else if (input && typeof Request !== "undefined" && input instanceof Request) input = new Request(next, input);
@@ -113,7 +126,7 @@
       var open = xhr.open;
       var send = xhr.send;
       xhr.open = function (method, url) {
-        xhr.__blUrl = rewriteVerdictsUrl(url);
+        xhr.__blUrl = rewritePerfUrl(url);
         arguments[1] = xhr.__blUrl;
         xhr.__blDefer = deferrable(method, xhr.__blUrl);
         return open.apply(xhr, arguments);

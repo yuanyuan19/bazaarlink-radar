@@ -17,7 +17,7 @@ import { ingestOnce, ingestWatch } from "./ingest/history.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { dbPathOf } from "./ingest/history.mjs";
 import { migrateDb } from "./db/schema.mjs";
-import { enrichPendingSubmissions, keyFingerprint, publishSubmission, recordSubmission } from "./core/submissions.mjs";
+import { enrichPendingSubmissions, keyFingerprint, recordSubmission } from "./core/submissions.mjs";
 
 const DISCLAIMER =
   "单次/聚合都不是长期保证。中转可以只对部分流量换模，也可以在检测时切回正货。相符只表示这次证据不支持偷换。";
@@ -69,18 +69,15 @@ export async function cmdRun(flags) {
 
   const started = await postJson(flags, "/api/probe/run", body, body.sync ? 180_000 : 30_000);
   const runId = started.runId || started.id;
-  if (runId) {
-    const submission = {
-      runId,
-      baseUrl: body.baseUrl,
-      requestModel: body.modelId,
-      keyAlias: flags.keyAlias,
-      apiGroup: flags.apiGroup,
-      keyFingerprint: keyFingerprint(body.apiKey, flags.fingerprintSecret || process.env.KEY_FINGERPRINT_SECRET),
-    };
-    if (flags.platformUrl || process.env.PLATFORM_INTERNAL_URL) {
-      await publishSubmission(submission, { endpoint: flags.platformUrl });
-    } else {
+    if (runId) {
+      const submission = {
+        runId,
+        baseUrl: body.baseUrl,
+        requestModel: body.modelId,
+        keyAlias: flags.keyAlias,
+        apiGroup: flags.apiGroup,
+        keyFingerprint: keyFingerprint(body.apiKey, flags.fingerprintSecret || process.env.KEY_FINGERPRINT_SECRET),
+      };
       const db = new DatabaseSync(dbPathOf(flags));
       try {
         migrateDb(db);
@@ -89,7 +86,6 @@ export async function cmdRun(flags) {
         db.close();
       }
     }
-  }
   let result = started;
   if (flags.wait && !body.sync && runId) result = await waitRun(flags, runId);
   const summary = summarizeRun(result);
@@ -408,12 +404,6 @@ export async function cmdServe(flags) {
   await new Promise(() => {});
 }
 
-export async function cmdPlatform(flags) {
-  const { startPlatform } = await import("./platform/server.mjs");
-  await startPlatform(flags);
-  await new Promise(() => {});
-}
-
 export async function cmdMaintenance(flags, pos) {
   const { runMaintenance } = await import("./maintenance/cli.mjs");
   printJson(runMaintenance(pos[0], flags), flags.pretty);
@@ -458,7 +448,6 @@ export const COMMANDS = {
   verdicts: cmdVerdicts,
   rank: cmdRank,
   serve: cmdServe,
-  platform: cmdPlatform,
   maintenance: cmdMaintenance,
   "ingest-history": cmdIngestHistory,
   "enrich-submissions": cmdEnrichSubmissions,
@@ -491,10 +480,7 @@ export function usage() {
   active
 
 镜像:
-  serve [--port 8787] [--origin https://bazaarlink.ai]
-
-数据站:
-  platform [--port 3000] [--db PATH]
+  serve [--port 8787] [--origin https://bazaarlink.ai] [--db PATH]
 
 维护:
   maintenance migrate|cleanup|backup [--db PATH] [--pretty]

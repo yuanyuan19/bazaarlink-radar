@@ -27,6 +27,7 @@ export const officialProbeCopy = {
     histStatusInconclusive: "无法判定",
     histStatusRunning: "进行中",
     histStatusFailed: "检测失败",
+    histIdentityMismatch: "模型不符 · ",
   },
   modes: [
     {

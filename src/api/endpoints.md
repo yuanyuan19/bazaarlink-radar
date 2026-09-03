@@ -4,15 +4,20 @@
 
 Origin: `https://bazaarlink.ai`。
 
-## 本项目内部接口
+## 镜像内部接口（`serve`）
 
-`POST /api/my-runs` 是数据站「我的检测」的提交入口：把 `baseUrl`、`apiKey`、`modelId` 转发到官方 `/api/probe/run`，立刻写入摘要，再异步补全结果。API Key 不得写入数据库或日志。
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/__bl/health` | 镜像与 SQLite 采集状态 |
+| GET | `/__bl/history-boot.json` | 公开检测本地库首屏（默认 48 条，支持 `excludeIds`） |
+| GET | `/__bl/history.json` | 公开检测分页搜索（`q`、`band`、`offset`、`limit`、`excludeIds`） |
+| GET | `/__bl/probe-copy.json` | 官方 Probe 页面文案（供注入脚本复用标签） |
+| GET | `/__bl/pulse-boot.json` | Pulse 首屏 |
+| GET | `/__bl/pulse-index.json` | Pulse 全量索引 |
 
-`POST /internal/submissions` 仍给 CLI 在已有 `runId` 时入库，只接受 `runId`、`baseUrl`、`requestModel`、时间和非敏感分组字段。API Key 不得发送到该接口。
+镜像进程内会自动轮询官方 `/api/probe/history` 入库（与 `ingest-history --if-due` 相同逻辑），并周期性执行 `enrich-submissions`。
 
-`GET /api/runs/:id/live` 会去官方轮询进度；检测结束后再拉 `history/{id}` 补全本机记录。
-
-接口只持久化检测摘要和待补全任务，立即返回 `202`。`enrich-submissions` 命令异步读取官方 `/api/probe/history/{id}` 并补全结果，失败按持久化退避时间重试。
+CLI `run` 写入的摘要直接进 SQLite（`--db PATH`），不再经过独立数据站。
 
 ## Skill 已写、探通
 
@@ -58,6 +63,7 @@ Origin: `https://bazaarlink.ai`。
 | 路径 | 内容 |
 |---|---|
 | `/probe?tab=pulse` | 工具 + Pulse + 判定树，一次 SSR 很大 |
+| `/probe?tab=history` | 公开检测历史（镜像会合并 SQLite 采集并虚拟滚动） |
 | `/probe/relay` | 目录表：host / 检测次数 / 不同日期 / 模型数。解析到 352 行 |
 | `/probe/relay/{host}` | 分模型表：宣称模型 / 指紋判定 / 實際家族 / 檢測次數 / 最後檢測。判定：`相符` `家族相符` `替換` `未確定` |
 | `/en/probe/relay` | 英文同结构，判定：Match / Family match / Substitution / Unknown |

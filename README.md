@@ -1,6 +1,6 @@
 # bazaarlink-radar
 
-面向 [BazaarLink Probe](https://bazaarlink.ai/probe?tab=pulse) 的命令行工具：查询检测记录、筛选中转站，另附一个本地按需加载的镜像和一个数据站。
+面向 [BazaarLink Probe](https://bazaarlink.ai/probe?tab=pulse) 的命令行工具：查询检测记录、筛选中转站，另附一个本地镜像（合并公开检测采集、缓解官方页面卡顿）。
 
 BazaarLink Probe 本身已经能检测中转站。本项目不去重复实现检测，只消费它公开的结果，把常用的查询和筛选做成一条命令，同时用本地镜像缓解官方页面一次灌入整站造成的卡顿。
 
@@ -8,7 +8,7 @@ BazaarLink Probe 本身已经能检测中转站。本项目不去重复实现检
 
 - **只用现成的，不另起炉灶**：检测走官方公开 API，不写自己的探针，也不改动或评价官方的判定算法。
 - **一次检测只是抽样**：相符表示这次证据不支持偷换，不代表保证没换。近亲型号有分辨上限。
-- **三件事共用一层数据**：命令行（给人、给 Agent 用）、本地镜像（解决官方页面卡顿）、数据站（长期保存并聚合公开检测史和自己的检测记录）。
+- **CLI + 镜像共用 SQLite**：命令行（给人、给 Agent 用）与镜像后台采集共用 `probe-history.sqlite`；镜像在官方页面上增强 Pulse 与公开检测表。
 
 ## 安装
 
@@ -74,68 +74,58 @@ node src/cli.mjs active --pretty
 ### 本地镜像
 
 ```text
-node src/cli.mjs serve --port 8787
+node src/cli.mjs serve --port 8787 --db data/cache/probe-history.sqlite
 ```
 
-打开 http://127.0.0.1:8787/probe?tab=pulse。
+- **Pulse**：http://127.0.0.1:8787/probe?tab=pulse — 克隆官方 8 列表格 + 虚拟滚动。
+- **公开检测**：http://127.0.0.1:8787/probe?tab=history — 官方当前窗口 + SQLite 里更早的采集记录，合并去重、虚拟滚动、服务端分页搜索。
 
-镜像把官方 HTML/JS/CSS 拉下来、注入性能补丁，API 原样转发。除了 Pulse「端点状态监控」那张会卡死的大表，其它区块都是官方原版。那张表克隆了官方的表头、列宽和样式，首屏先画官方自己的 24 行，再渐进补全，用虚拟滚动只渲染视口里的行。
+镜像把官方 HTML/JS/CSS 拉下来、注入性能补丁，API 原样转发。除了 Pulse 大表和公开检测表，其它区块都是官方原版。
+
+`serve` 启动后会：
+
+1. 按自适应间隔轮询官方 `/api/probe/history` 入库（与 `ingest-history --if-due` 相同）。
+2. 周期性补全 CLI 提交的 pending run（`enrich-submissions`）。
 
 `?blperf=off` 关闭注入、只当纯代理，用来对比排障。改完注入后要强制刷新（Ctrl+F5）。细节见 `src/mirror/inject/README.md`。
 
-### 数据站
-
-数据站提供公开检测历史、站点与模型查询 API，以及一个最小查询页面：
-
-```text
-npm run platform
-```
-
-打开 http://127.0.0.1:3000。默认共用 `data/cache/probe-history.sqlite`，可用 `--db PATH` 指定其它库。
-
 ### 检测记录入库
 
-自己的检测在数据站「我的检测」里提交，或用 CLI `run`。镜像只负责现场看官方页面，不再捕获提交。API Key 只转发到官方，不入库、不写日志。可选设置 `KEY_FINGERPRINT_SECRET` 来生成不可逆的 Key 关联指纹。
+CLI `run` 会把摘要写入 SQLite（`--db PATH`）。API Key 只转发到官方，不入库、不写日志。可选设置 `KEY_FINGERPRINT_SECRET` 来生成不可逆的 Key 关联指纹。
 
 ```text
 node src/cli.mjs run --base-url https://upstream.example/v1 --api-key %BL_PROBE_API_KEY% --model anthropic/claude-opus-5 --db data/cache/probe-history.sqlite
 ```
 
-新提交采用“先摘要、后详情”：提交一成功就能在“我的检测”看到，页面会轮询官方进度，定时任务也会补全判定与分数。补全任务持久化在 SQLite 中，失败会退避重试：
+补全任务持久化在 SQLite 中，失败会退避重试。镜像进程内会自动跑；也可手动：
 
 ```text
 node src/cli.mjs enrich-submissions --db data/cache/probe-history.sqlite --limit 10
 ```
 
-官方 `/api/probe/history` 最多返回约 100 条，不翻页、丢得快。本地按 `id` 去重攒起来，方便以后自己聚合。默认每 30 分钟拉一次；如果某个窗口几乎全是新记录（可能漏了），间隔会自动降到 5 分钟，平静后再回到 30 分钟。
+官方 `/api/probe/history` 最多返回约 100 条，不翻页、丢得快。本地按 `id` 去重攒起来，在镜像公开检测 Tab 里与官方窗口合并展示。默认每 30 分钟拉一次；如果某个窗口几乎全是新记录（可能漏了），间隔会自动降到 5 分钟，平静后再回到 30 分钟。
 
 ```text
 node src/cli.mjs ingest-history --once --pretty   # 拉一次
-node src/cli.mjs ingest-history                   # 常驻轮询
+node src/cli.mjs ingest-history                   # 常驻轮询（不必与 serve 同时开）
 ```
 
 数据库是 SQLite（WAL），存于 `data/cache/probe-history.sqlite`，已加入 gitignore。
 
 ## Docker 部署（VPS）
 
-把 `.env.example` 复制为 `.env`，准备持久化目录后启动长期服务：
+把 `.env.example` 复制为 `.env`，准备持久化目录后启动：
 
 ```text
 mkdir -p data backups deploy/certs
 docker compose build
 docker compose --profile jobs run --rm --no-deps maintenance migrate
-docker compose up -d gateway mirror platform
+docker compose up -d gateway mirror
 ```
 
-采集与维护由宿主机上的 systemd timer 触发：
+把 `deploy/nginx/insight.conf` 里的示例域名替换成实际域名，在 `deploy/certs` 准备好证书后再开放 HTTPS。SQLite 数据和备份留在 VPS 本地磁盘。
 
-```text
-sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bazaarlink-ingest.timer bazaarlink-maintenance.timer
-```
-
-把 `deploy/nginx/insight.conf` 里的示例域名替换成实际域名，在 `deploy/certs` 准备好证书后再开放 HTTPS。SQLite 数据和备份留在 VPS 本地磁盘，远程位置只用来同步备份。
+维护任务仍可用 systemd timer（备份、清理）；采集已内置在 `mirror` 服务里，一般不必再单独跑 ingest timer。
 
 ## 给 Agent 用
 

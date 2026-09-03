@@ -4,6 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { originFrom } from "../api/client.mjs";
 import { loadVerdicts, pageVerdicts, indexVerdicts, bootVerdicts } from "../api/verdicts.mjs";
+import { dbPathOf, ingestOnce, openDb } from "../ingest/history.mjs";
+import { enrichPendingSubmissions } from "../core/submissions.mjs";
+import { handleHistoryRoute, jsonResponse } from "./history-api.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function readInject(name) {
@@ -45,8 +48,8 @@ function rewriteHtml(html, localOrigin) {
     .replaceAll("https://www.bazaarlink.ai", localOrigin)
     .replaceAll("https://api.bazaarlink.ai", localOrigin);
   const tags =
-    `<script>window.__blPulseBootP=fetch("/__bl/pulse-boot.json").then(function(r){return r.json()});window.__blPulseIndexP=fetch("/__bl/pulse-index.json").then(function(r){return r.json()});</script>` +
-    `<script src="/__bl/perf.js"></script><script src="/__bl/pulse-virt.js"></script>`;
+    `<script>window.__blPulseBootP=fetch("/__bl/pulse-boot.json").then(function(r){return r.json()});window.__blPulseIndexP=fetch("/__bl/pulse-index.json").then(function(r){return r.json()});window.__blHistBootP=fetch("/__bl/history-boot.json").then(function(r){return r.json()});</script>` +
+    `<script src="/__bl/perf.js"></script><script src="/__bl/pulse-virt.js"></script><script src="/__bl/history-virt.js"></script>`;
   if (out.includes("</head>")) out = out.replace("</head>", `${tags}</head>`);
   else out = tags + out;
   return out;
@@ -60,18 +63,72 @@ function shouldCache(method, urlPath) {
   return true;
 }
 
-export async function startMirror(flags) {
+function startBackgroundJobs(flags, dbFile) {
+  let ingestBusy = false;
+  let enrichBusy = false;
+
+  const tickIngest = async () => {
+    if (ingestBusy) return;
+    ingestBusy = true;
+    try {
+      const result = await ingestOnce({ ...flags, db: dbFile, ifDue: true });
+      if (!result.skipped && !result.reason) {
+        process.stderr.write(`[mirror] ingest +${result.inserted}/${result.fetched} total=${result.total}\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[mirror] ingest error: ${err.message}\n`);
+    } finally {
+      ingestBusy = false;
+    }
+  };
+
+  const tickEnrich = async () => {
+    if (enrichBusy) return;
+    enrichBusy = true;
+    const db = openDb(dbFile);
+    try {
+      const outcome = await enrichPendingSubmissions(db, flags, { limit: 5 });
+      if (outcome.attempted) {
+        process.stderr.write(`[mirror] enrich ${outcome.completed}/${outcome.attempted}\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[mirror] enrich error: ${err.message}\n`);
+    } finally {
+      db.close();
+      enrichBusy = false;
+    }
+  };
+
+  tickIngest().catch(() => {});
+  tickEnrich().catch(() => {});
+  setInterval(() => {
+    tickIngest().catch(() => {});
+    tickEnrich().catch(() => {});
+  }, 60_000);
+}
+
+export function createMirrorServer(flags = {}) {
   const origin = originFrom(flags);
   const port = Number(flags.port || 8787);
   const host = String(flags.host || process.env.MIRROR_HOST || "127.0.0.1");
   const noCache = Boolean(flags.noCache);
   const localOrigin = `http://127.0.0.1:${port}`;
+  const dbFile = dbPathOf(flags);
+  const db = openDb(dbFile);
 
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", localOrigin);
       if (url.pathname === "/__bl/health") {
-        const body = Buffer.from(JSON.stringify({ status: "ok", service: "mirror" }), "utf8");
+        const state = db.prepare("SELECT last_success_at, last_error FROM ingest_state WHERE id = 1").get();
+        const count = db.prepare("SELECT COUNT(*) AS n FROM probe_runs").get().n;
+        const body = Buffer.from(JSON.stringify({
+          status: "ok",
+          service: "mirror",
+          records: count,
+          lastSuccessfulIngestAt: state?.last_success_at || null,
+          lastError: state?.last_error || null,
+        }), "utf8");
         res.writeHead(200, {
           "content-type": "application/json; charset=utf-8",
           "cache-control": "no-store",
@@ -80,13 +137,20 @@ export async function startMirror(flags) {
         res.end(body);
         return;
       }
-      if (url.pathname === "/__bl/perf.js" || url.pathname === "/__bl/pulse-virt.js") {
-        const name = url.pathname === "/__bl/perf.js" ? "perf.js" : "pulse-virt.js";
+      if (url.pathname === "/__bl/perf.js" || url.pathname === "/__bl/pulse-virt.js" || url.pathname === "/__bl/history-virt.js") {
+        const name = url.pathname.slice("/__bl/".length);
         res.writeHead(200, {
           "content-type": "application/javascript; charset=utf-8",
           "cache-control": "no-store",
         });
         res.end(readInject(name));
+        return;
+      }
+      const historyPayload = handleHistoryRoute(db, url);
+      if (historyPayload) {
+        const out = jsonResponse(historyPayload);
+        res.writeHead(out.status, out.headers);
+        res.end(out.body);
         return;
       }
       if (url.pathname === "/__bl/pulse-boot.json" || url.pathname === "/__bl/pulse-index.json") {
@@ -231,12 +295,31 @@ export async function startMirror(flags) {
     }
   });
 
+  return { server, db, origin, port, host, noCache, localOrigin, dbFile };
+}
+
+export async function startMirror(flags) {
+  const mirror = createMirrorServer(flags);
+  const { server, db, origin, port, host, noCache, localOrigin, dbFile } = mirror;
+
   await new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(port, host, resolve);
   });
-  process.stderr.write(`镜像: ${localOrigin}/probe?tab=pulse  ←  ${origin}\n`);
-  process.stderr.write(`Pulse 表克隆官方样式 + 虚拟滚动；其它区块原样。?blperf=off 关掉注入\n`);
+
+  server.on("close", () => {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  });
+
+  const count = db.prepare("SELECT COUNT(*) AS n FROM probe_runs").get().n;
+  process.stderr.write(`镜像: ${localOrigin}/probe?tab=history  ←  ${origin}\n`);
+  process.stderr.write(`SQLite ${dbFile}（${count} 条）；公开检测合并本地采集 + 虚拟滚动。?blperf=off 关掉注入\n`);
+  startBackgroundJobs(flags, dbFile);
+
   loadVerdicts({ origin })
     .then((data) => {
       process.stderr.write(`[mirror] verdicts ${((data && data.cards) || []).length} cards\n`);
@@ -252,7 +335,7 @@ export async function startMirror(flags) {
 
 async function warmup(origin, localOrigin, noCache) {
   if (noCache) return 0;
-  const paths = ["/probe?tab=pulse"];
+  const paths = ["/probe?tab=pulse", "/probe?tab=history"];
   let done = 0;
   for (const p of paths) {
     const key = "GET " + p;

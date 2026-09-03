@@ -1,6 +1,6 @@
 # 注入了哪几处
 
-由 `serve` 在原站 `</head>` 前插入 boot 预取 + `perf.js` + `pulse-virt.js`。官方打包 JS 不改。`?blperf=off` 关掉注入，只当纯代理。
+由 `serve` 在原站 `</head>` 前插入 boot 预取 + `perf.js` + `pulse-virt.js` + `history-virt.js`。官方打包 JS 不改。`?blperf=off` 关掉注入，只当纯代理。
 
 ## 针对性替换：Pulse「端点状态监控」表
 
@@ -12,6 +12,17 @@
 4. **懒渲染**：tbody 只保留视口附近的行。点开一行再按 host 拉完整卡片做展开详情。
 5. **Fail-open**：找不到 8 列表格就不接管，页面停在官方那 24 行，不会空白。
 
+## 针对性替换：公开检测（history Tab）表
+
+官方 `/api/probe/history` 最多约 100 条且不翻页。镜像在后台定时采集进 SQLite，并在 history Tab：
+
+1. **首屏**：`/api/probe/history` 改为 `limit=50`；拦截响应拿到官方当前窗口。
+2. **合并**：官方行优先，再拼接本地库中 `id` 不在官方集合里的记录（去重）。
+3. **克隆**：找 6 列表格，复制表头 / colgroup / 首行 inline style，隐藏官方 tbody。
+4. **搜索**：沿用官方 URL 筛选框与分数 band pills；本地部分可走 `/__bl/history.json` 服务端分页。
+5. **懒渲染**：虚拟滚动 + 滚到底继续拉本地页。
+6. **Fail-open**：找不到 6 列表格就不接管。
+
 其它 Tab、表单、判定树、比价都不替换。
 
 ## perf.js 对其它区块
@@ -19,6 +30,7 @@
 | hook | 做什么 |
 |---|---|
 | 同源 `/api/**` GET 排队 | 首屏最多 2 个并发，`load` 或 1.2s 后放开。`mode=` / `exact=` 不排队 |
+| relay-verdicts / history 首请求瘦身 | 无 `limit=` 时分别加 `limit=24` / `limit=50` |
 | `content-visibility: auto` | 距视口 1.5 屏以外的大容器跳过绘制；表格内部和虚拟表容器排除 |
 
 ## 明确不做
