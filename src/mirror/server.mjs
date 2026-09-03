@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { originFrom } from "../api/client.mjs";
 import { loadVerdicts, pageVerdicts, indexVerdicts, bootVerdicts } from "../api/verdicts.mjs";
 import { dbPathOf, ingestOnce, openDb } from "../ingest/history.mjs";
+import { startActiveWatch } from "../ingest/active-watch.mjs";
 import { enrichPendingSubmissions } from "../core/submissions.mjs";
 import { handleHistoryRoute, jsonResponse } from "./history-api.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,7 @@ function rewriteHtml(html, localOrigin) {
 function shouldCache(method, urlPath) {
   if (method !== "GET") return false;
   if (urlPath.startsWith("/api/probe/run")) return false;
+  if (urlPath.startsWith("/api/probe/active")) return false;
   if (urlPath.startsWith("/api/probe/detect")) return false;
   if (urlPath.startsWith("/api/probe/models")) return false;
   return true;
@@ -73,13 +75,17 @@ function startBackgroundJobs(flags, dbFile) {
   let ingestBusy = false;
   let enrichBusy = false;
 
+  // 主路径：跟官方页面一样盯 /api/probe/active，任务一完成就拉 history 入库。
+  startActiveWatch({ ...flags, db: dbFile });
+
+  // 兜底：active 接口长期不可用时，仍按自适应间隔定期拉一次。
   const tickIngest = async () => {
     if (ingestBusy) return;
     ingestBusy = true;
     try {
       const result = await ingestOnce({ ...flags, db: dbFile, ifDue: true });
       if (!result.skipped && !result.reason) {
-        process.stderr.write(`[mirror] ingest +${result.inserted}/${result.fetched} total=${result.total}\n`);
+        process.stderr.write(`[mirror] ingest(fallback) +${result.inserted}/${result.fetched} total=${result.total}\n`);
       }
     } catch (err) {
       process.stderr.write(`[mirror] ingest error: ${err.message}\n`);
@@ -105,7 +111,6 @@ function startBackgroundJobs(flags, dbFile) {
     }
   };
 
-  tickIngest().catch(() => {});
   tickEnrich().catch(() => {});
   setInterval(() => {
     tickIngest().catch(() => {});
@@ -152,7 +157,7 @@ export function createMirrorServer(flags = {}) {
         res.end(readInject(name));
         return;
       }
-      const historyPayload = await handleHistoryRoute(db, url, { origin });
+      const historyPayload = handleHistoryRoute(db, url);
       if (historyPayload) {
         const out = jsonResponse(historyPayload);
         res.writeHead(out.status, out.headers);

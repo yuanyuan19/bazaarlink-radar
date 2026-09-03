@@ -1,19 +1,14 @@
-/* History tab: feed merged (official + local SQLite) pages into the official React state.
-   The table is rendered entirely by official code; we only add a pager under it.
-   Fail open: if the state setter cannot be found, page 1 still shows merged data. */
+/* History tab: feed snapshot pages (local SQLite, kept live by the mirror) into the official React state.
+   The table is rendered entirely by official code; we only add a pager under it and keep ?page= in the URL.
+   Fail open: if the state setter cannot be found, the first paint still shows the requested page. */
 (function () {
   if (window.__blHistVirt) return;
   if (/[?&]blperf=off(?:[&#]|$)/.test(location.search)) return;
   window.__blHistVirt = true;
 
   var PAGE = 50;
-  var query = { q: "", band: "all", page: 1 };
-  try {
-    var savedPage = Number(sessionStorage.getItem("bl:hist:page") || 1);
-    if (savedPage > 1) query.page = savedPage;
-    sessionStorage.removeItem("bl:hist:page");
-  } catch (e) {}
-  var last = null; // last payload from /__bl/history-page.json
+  var query = { q: "", band: "all", page: pageFromUrl(), asOf: "" };
+  var last = null;
   var dispatch = null;
   var loading = false;
   var debounceTimer = 0;
@@ -28,12 +23,30 @@
     return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  function historyTabActive() {
+  function params() {
     try {
-      return new URLSearchParams(location.search).get("tab") === "history";
+      return new URLSearchParams(location.search);
     } catch (e) {
-      return false;
+      return new URLSearchParams("");
     }
+  }
+
+  function historyTabActive() {
+    return params().get("tab") === "history";
+  }
+
+  function pageFromUrl() {
+    var n = Number(params().get("page") || 1);
+    return n >= 1 ? Math.floor(n) : 1;
+  }
+
+  function writePageToUrl(page) {
+    try {
+      var u = new URL(location.href);
+      if (page > 1) u.searchParams.set("page", String(page));
+      else u.searchParams.delete("page");
+      if (u.toString() !== location.href) history.replaceState(history.state, "", u.toString());
+    } catch (e) {}
   }
 
   function pageUrl(q) {
@@ -41,7 +54,8 @@
       "/__bl/history-page.json?limit=" + PAGE +
       "&page=" + encodeURIComponent(String(q.page || 1)) +
       "&q=" + encodeURIComponent(q.q || "") +
-      "&band=" + encodeURIComponent(q.band || "all")
+      "&band=" + encodeURIComponent(q.band || "all") +
+      (q.asOf ? "&asOf=" + encodeURIComponent(q.asOf) : "")
     );
   }
 
@@ -65,8 +79,7 @@
   }
 
   function findCard() {
-    var input = findSearch();
-    var el = input;
+    var el = findSearch();
     for (var i = 0; i < 18 && el; i++) {
       var st = (el.getAttribute && el.getAttribute("style")) || "";
       if (/max-width:\s*1100px/.test(st)) return el;
@@ -78,33 +91,24 @@
   function findTable() {
     var tables = document.querySelectorAll("table");
     for (var i = 0; i < tables.length; i++) {
-      if (tables[i].querySelectorAll("col").length === 6) return tables[i];
       var ths = tables[i].tHead && tables[i].tHead.rows[0] ? tables[i].tHead.rows[0].cells.length : 0;
       if (ths === 6) return tables[i];
     }
     return null;
   }
 
-  function pills(card) {
-    var out = [];
-    if (!card) return out;
+  function readBand(card) {
+    if (!card) return "all";
     var buttons = card.querySelectorAll("button");
     for (var i = 0; i < buttons.length; i++) {
       var st = buttons[i].getAttribute("style") || "";
-      if (/border-radius:\s*999px/.test(st)) out.push(buttons[i]);
-    }
-    return out;
-  }
-
-  function readBand(card) {
-    var list = pills(card);
-    for (var i = 0; i < list.length; i++) {
-      var st = list[i].getAttribute("style") || "";
+      if (!/border-radius:\s*999px/.test(st)) continue;
+      if (buttons[i].closest("[data-bl-hist-pager]")) continue;
       var active = /background:\s*var\(--fg\)/.test(st);
       if (active && !pillActiveStyle) pillActiveStyle = st;
       if (!active && !pillStyle) pillStyle = st;
       if (!active) continue;
-      var txt = (list[i].textContent || "").trim();
+      var txt = (buttons[i].textContent || "").trim();
       if (txt === "80+") return "80";
       if (txt === "50+") return "50";
       if (txt === "<50") return "low";
@@ -126,8 +130,7 @@
   }
 
   function sameRows(arr, rows) {
-    if (!Array.isArray(arr) || !rows) return false;
-    if (arr.length !== rows.length) return false;
+    if (!Array.isArray(arr) || !rows || arr.length !== rows.length) return false;
     if (!arr.length) return true;
     return arr[0] && rows[0] && arr[0].id === rows[0].id && arr[arr.length - 1].id === rows[rows.length - 1].id;
   }
@@ -136,17 +139,14 @@
     var hook = fiber && fiber.memoizedState;
     var hg = 0;
     while (hook && typeof hook === "object" && hg++ < 80) {
-      if (hook.queue && typeof hook.queue.dispatch === "function" && sameRows(hook.memoizedState, rows)) {
-        return hook.queue.dispatch;
-      }
+      if (hook.queue && typeof hook.queue.dispatch === "function" && sameRows(hook.memoizedState, rows)) return hook.queue.dispatch;
       hook = hook.next;
     }
     return null;
   }
 
   function findDispatch(rows) {
-    var table = findTable();
-    var fiber = fiberOf(table);
+    var fiber = fiberOf(findTable());
     var guard = 0;
     while (fiber && guard++ < 60) {
       var d = scanHooks(fiber, rows) || scanHooks(fiber.alternate, rows);
@@ -182,7 +182,11 @@
 
   function pagerHtml() {
     var p = last.page, n = last.pages;
-    var html = btn("‹ 上一页", p <= 1 || loading, p - 1);
+    var html = "";
+    if (last.newerCount > 0) {
+      html += '<button type="button" data-bl-refresh style="' + esc(pillStyle || PILL) + '">↻ ' + esc(last.newerCount + " 条新记录") + "</button>";
+    }
+    html += btn("‹ 上一页", p <= 1 || loading, p - 1);
     var show = [];
     for (var i = Math.max(1, p - 2); i <= Math.min(n, p + 2); i++) show.push(i);
     if (show[0] > 1) html += btn("1", loading, 1) + (show[0] > 2 ? '<span style="color:var(--fg-subtle)">…</span>' : "");
@@ -199,14 +203,16 @@
     return html;
   }
 
-  function makePager(pos) {
+  function makePager() {
     var pager = document.createElement("div");
-    pager.setAttribute("data-bl-hist-pager", pos);
-    pager.setAttribute("style", "display:flex;align-items:center;flex-wrap:wrap;gap:8px;" + (pos === "top" ? "margin-bottom:14px" : "margin-top:14px"));
+    pager.setAttribute("data-bl-hist-pager", "1");
+    pager.setAttribute("style", "display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:14px");
     pager.addEventListener("click", function (ev) {
-      var b = ev.target && ev.target.closest ? ev.target.closest("button[data-bl-page]") : null;
-      if (!b || b.disabled) return;
-      goTo(Number(b.getAttribute("data-bl-page")));
+      var t = ev.target && ev.target.closest ? ev.target : null;
+      if (!t) return;
+      if (t.closest("button[data-bl-refresh]")) return refresh();
+      var b = t.closest("button[data-bl-page]");
+      if (b && !b.disabled) goTo(Number(b.getAttribute("data-bl-page")));
     });
     pager.addEventListener("keydown", function (ev) {
       if (ev.key !== "Enter" || !ev.target || !ev.target.hasAttribute("data-bl-jump")) return;
@@ -218,23 +224,6 @@
     return pager;
   }
 
-  function placePager(pos, table, html) {
-    var pager = document.querySelector('[data-bl-hist-pager="' + pos + '"]');
-    if (!pager) pager = makePager(pos);
-    var wrap = table.parentElement || table;
-    var parent = wrap.parentNode;
-    if (!parent) return;
-    var want = pos === "top" ? wrap : wrap.nextSibling;
-    if (pager.parentNode !== parent || (pos === "top" ? pager.nextSibling !== wrap : pager.previousSibling !== wrap)) {
-      parent.insertBefore(pager, want);
-    }
-    pager.style.display = last.pages > 1 ? "flex" : "none";
-    if (pager.getAttribute("data-bl-html") !== html) {
-      pager.setAttribute("data-bl-html", html);
-      pager.innerHTML = html;
-    }
-  }
-
   function setRunningVisibility() {
     // Official code prepends the live "running" rows on every render; they belong to the head of the list only.
     var st = document.querySelector("style[data-bl-hist-style]");
@@ -244,20 +233,30 @@
       st.textContent = 'body[data-bl-hist-page]:not([data-bl-hist-page="1"]) table tr[data-running-row],body[data-bl-hist-page]:not([data-bl-hist-page="1"]) a[data-history-card][data-running-row]{display:none}';
       (document.head || document.documentElement).appendChild(st);
     }
-    document.body.setAttribute("data-bl-hist-page", String(last && historyTabActive() ? last.page : 1));
+    document.body.setAttribute("data-bl-hist-page", String(last.page));
   }
 
   function renderPager() {
     var table = findTable();
-    var pagers = document.querySelectorAll("[data-bl-hist-pager]");
+    var pager = document.querySelector("[data-bl-hist-pager]");
     if (!historyTabActive() || !table || !last) {
-      for (var i = 0; i < pagers.length; i++) pagers[i].style.display = "none";
+      if (pager) pager.style.display = "none";
       if (document.body) document.body.removeAttribute("data-bl-hist-page");
       return;
     }
     readBand(findCard());
     setRunningVisibility();
-    placePager("bottom", table, pagerHtml());
+    if (!pager) pager = makePager();
+    var wrap = table.parentElement || table;
+    var parent = wrap.parentNode;
+    if (!parent) return;
+    if (pager.parentNode !== parent || pager.previousSibling !== wrap) parent.insertBefore(pager, wrap.nextSibling);
+    pager.style.display = last.pages > 1 || last.newerCount > 0 ? "flex" : "none";
+    var html = pagerHtml();
+    if (pager.getAttribute("data-bl-html") !== html) {
+      pager.setAttribute("data-bl-html", html);
+      pager.innerHTML = html;
+    }
   }
 
   /* ---------- loading ---------- */
@@ -274,15 +273,15 @@
       })
       .then(function (data) {
         loading = false;
+        query.page = data.page;
+        query.asOf = data.asOf || query.asOf;
         if (!dispatch && last) dispatch = findDispatch(last.history);
         if (!inject(data)) {
-          // Cannot reach the React state: reload and let the first-paint rewrite fetch this page.
-          try {
-            sessionStorage.setItem("bl:hist:page", String(query.page));
-          } catch (e) {}
+          writePageToUrl(query.page);
           location.reload();
           return;
         }
+        writePageToUrl(query.page);
         renderPager();
       })
       .catch(function () {
@@ -291,40 +290,66 @@
       });
   }
 
-  function goTo(page) {
-    if (!last) return;
-    if (page < 1 || page > last.pages || page === query.page) return;
-    if (window.console && console.debug) console.debug("[bl-hist] goTo", page, "dispatch", !!dispatch);
-    load({ q: query.q, band: query.band, page: page });
-    var table = findTable();
-    var card = findCard();
-    var anchor = card || table;
+  function scrollTop() {
+    var anchor = findCard() || findTable();
     if (anchor && anchor.getBoundingClientRect().top < 0) anchor.scrollIntoView({ block: "start" });
+  }
+
+  function goTo(page) {
+    if (!last || page < 1 || page > last.pages || page === query.page) return;
+    load({ q: query.q, band: query.band, page: page, asOf: query.asOf });
+    scrollTop();
+  }
+
+  // New records arrived after the snapshot: move the anchor forward and start over from page 1.
+  function refresh() {
+    load({ q: query.q, band: query.band, page: 1, asOf: "" });
+    scrollTop();
   }
 
   function syncFilters() {
     if (!historyTabActive()) return;
-    var card = findCard();
     var input = findSearch();
     var q = input ? String(input.value || "").trim() : "";
-    var band = readBand(card);
+    var band = readBand(findCard());
     if (q === query.q && band === query.band) return;
-    load({ q: q, band: band, page: 1 });
+    load({ q: q, band: band, page: 1, asOf: query.asOf });
   }
 
   function afterOfficialFetch(data) {
-    // Official code just stored data.history in its state; remember it and locate the setter.
+    // The official code just stored data.history in its state; remember it and locate the setter.
     last = data;
+    query.page = data.page || query.page;
+    query.asOf = data.asOf || query.asOf;
     requestAnimationFrame(function () {
       dispatch = findDispatch(data.history) || dispatch;
+      writePageToUrl(query.page);
       renderPager();
     });
+  }
+
+  // The mirror keeps SQLite live; ask it periodically whether anything newer than the anchor exists.
+  function pollNewer() {
+    if (!historyTabActive() || !last || loading) return;
+    nativeFetch(pageUrl({ q: query.q, band: query.band, page: query.page, asOf: query.asOf }) + "&limit=1")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !last) return;
+        if (data.newerCount !== last.newerCount) {
+          last.newerCount = data.newerCount;
+          renderPager();
+        }
+      })
+      .catch(function () {});
   }
 
   /* ---------- wiring ---------- */
 
   if (typeof window.__blOnResponse === "function") {
-    window.__blOnResponse(/^\/__bl\/history-page\.json$/, afterOfficialFetch);
+    window.__blOnResponse(/^\/__bl\/history-page\.json$/, function (data, url) {
+      if (/[?&]limit=1(&|$)/.test(String(url))) return;
+      afterOfficialFetch(data);
+    });
   }
 
   document.addEventListener("input", function (ev) {
@@ -359,6 +384,10 @@
     };
   });
   window.addEventListener("popstate", function () {
+    var p = pageFromUrl();
+    if (historyTabActive() && last && p !== query.page) load({ q: query.q, band: query.band, page: p, asOf: query.asOf });
     setTimeout(renderPager, 80);
   });
+
+  setInterval(pollNewer, 15000);
 })();

@@ -78,13 +78,13 @@ node src/cli.mjs serve --port 8787 --db data/cache/probe-history.sqlite
 ```
 
 - **Pulse**：http://127.0.0.1:8787/probe?tab=pulse — 克隆官方 8 列表格 + 虚拟滚动。
-- **检测记录**：http://127.0.0.1:8787/probe?tab=history — 与官方页面一模一样，只是记录不止 100 条：官方当前窗口 + SQLite 里更早的采集记录合并去重，每页 50 条，表格下方翻页，搜索和分数档对合并后的全集生效。
+- **检测记录**：http://127.0.0.1:8787/probe?tab=history — 与官方页面一模一样，只是记录不止 100 条：镜像盯着官方进行中列表，任务一完成就入库，列表只增不减。每页 50 条、表格下方翻页、页码进 URL；翻页基于进入时的快照，停多久再翻都不重不漏，有新记录时翻页条提示「N 条新记录」。搜索和分数档对全集生效。
 
 镜像把官方 HTML/JS/CSS 拉下来、注入性能补丁，API 原样转发。除了 Pulse 大表和公开检测表，其它区块都是官方原版。
 
 `serve` 启动后会：
 
-1. 按自适应间隔轮询官方 `/api/probe/history` 入库（与 `ingest-history --if-due` 相同）。
+1. 跟官方页面同一节奏盯 `/api/probe/active`，有任务完成就拉 `/api/probe/history` 入库；自适应间隔轮询作兜底。
 2. 周期性补全 CLI 提交的 pending run（`enrich-submissions`）。
 
 `?blperf=off` 关闭注入、只当纯代理，用来对比排障。改完注入后要强制刷新（Ctrl+F5）。细节见 `src/mirror/inject/README.md`。

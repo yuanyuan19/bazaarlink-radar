@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -40,7 +40,9 @@ const NORMALIZED_SCHEMA = `
     confirmed_mismatch INTEGER,
     error_count INTEGER,
     input_tokens INTEGER,
-    output_tokens INTEGER
+    output_tokens INTEGER,
+    identity_only INTEGER,
+    total_probes INTEGER
   );
   CREATE TABLE IF NOT EXISTS run_sources (
     run_id TEXT NOT NULL REFERENCES probe_runs(id) ON DELETE CASCADE,
@@ -175,6 +177,12 @@ export function migrateDb(db) {
   }
   if (!columnExists(db, "probe_runs", "run_uuid")) {
     db.exec("ALTER TABLE probe_runs ADD COLUMN run_uuid TEXT");
+  }
+  if (!columnExists(db, "probe_results", "identity_only")) {
+    db.exec("ALTER TABLE probe_results ADD COLUMN identity_only INTEGER");
+  }
+  if (!columnExists(db, "probe_results", "total_probes")) {
+    db.exec("ALTER TABLE probe_results ADD COLUMN total_probes INTEGER");
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_probe_runs_uuid ON probe_runs(run_uuid) WHERE run_uuid IS NOT NULL");
   db.exec("CREATE INDEX IF NOT EXISTS idx_probe_runs_created_id ON probe_runs(created_at DESC, id DESC)");

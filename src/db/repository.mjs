@@ -99,9 +99,12 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
   db.prepare(`
     INSERT INTO probe_results(
       run_id, model_id, actual_model, actual_family, verdict, score,
-      identity_confirmed, confirmed_mismatch, error_count, input_tokens, output_tokens
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      identity_confirmed, confirmed_mismatch, error_count, input_tokens, output_tokens,
+      identity_only, total_probes
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id) DO UPDATE SET
+      identity_only = COALESCE(excluded.identity_only, probe_results.identity_only),
+      total_probes = COALESCE(excluded.total_probes, probe_results.total_probes),
       model_id = COALESCE(excluded.model_id, probe_results.model_id),
       actual_model = COALESCE(excluded.actual_model, probe_results.actual_model),
       actual_family = COALESCE(excluded.actual_family, probe_results.actual_family),
@@ -118,6 +121,7 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
     item.confirmedMismatch ? "substitution" : item.identityConfirmed ? "match" : "unknown",
     item.score ?? null, bool01(item.identityConfirmed), bool01(item.confirmedMismatch),
     item.errorCount ?? null, item.totalInputTokens ?? null, item.totalOutputTokens ?? null,
+    bool01(item.identityOnly), item.totalProbes ?? (Array.isArray(item.items) ? item.items.length : null),
   );
 
   if (sourceType) {

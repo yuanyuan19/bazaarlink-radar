@@ -9,12 +9,12 @@ Origin: `https://bazaarlink.ai`。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/__bl/health` | 镜像与 SQLite 采集状态 |
-| GET | `/__bl/history-page.json` | 检测记录合并页：`page`、`limit=50`、`q`、`band=all|80|50|low|running`。官方窗口（缓存 15s，过滤后）排前，本地库按 `id`/`run_uuid` 去重后接在后面。返回 `{ history, page, pages, total, officialCount, localCount }`，`history` 每项与官方 `/api/probe/history` 同形 |
+| GET | `/__bl/history-page.json` | 检测记录快照页：`page`、`limit=50`、`q`、`band=all|80|50|low|running`、`asOf`（锚点，缺省取最新入库时刻）。只查本地 SQLite，`ingested_at <= asOf` 的集合分页，返回 `{ history, page, pages, total, asOf, newerCount }`；`history` 每项与官方 `/api/probe/history` 同形 |
 | GET | `/__bl/probe-copy.json` | 官方 Probe 页面文案（供注入脚本复用标签） |
 | GET | `/__bl/pulse-boot.json` | Pulse 首屏 |
 | GET | `/__bl/pulse-index.json` | Pulse 全量索引 |
 
-镜像进程内会自动轮询官方 `/api/probe/history` 入库（与 `ingest-history --if-due` 相同逻辑），并周期性执行 `enrich-submissions`。
+镜像进程内的采集与官方页面同节奏：盯 `/api/probe/active`（有任务 5s、空闲 10s），runId 从 active 消失即拉一次 `/api/probe/history` 入库；自适应间隔轮询（`ingest-history --if-due`）作兜底；并周期性执行 `enrich-submissions`。`/api/probe/active` 不走镜像缓存。
 
 CLI `run` 写入的摘要直接进 SQLite（`--db PATH`），不再经过独立数据站。
 
