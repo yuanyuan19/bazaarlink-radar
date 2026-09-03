@@ -14,6 +14,10 @@ import {
   summarizeRun,
 } from "./util.mjs";
 import { ingestOnce, ingestWatch } from "./ingest/history.mjs";
+import { DatabaseSync } from "node:sqlite";
+import { dbPathOf } from "./ingest/history.mjs";
+import { migrateDb } from "./db/schema.mjs";
+import { enrichPendingSubmissions, keyFingerprint, publishSubmission, recordSubmission } from "./core/submissions.mjs";
 
 const DISCLAIMER =
   "单次/聚合都不是长期保证。中转可以只对部分流量换模，也可以在检测时切回正货。相符只表示这次证据不支持偷换。";
@@ -65,6 +69,27 @@ export async function cmdRun(flags) {
 
   const started = await postJson(flags, "/api/probe/run", body, body.sync ? 180_000 : 30_000);
   const runId = started.runId || started.id;
+  if (runId) {
+    const submission = {
+      runId,
+      baseUrl: body.baseUrl,
+      requestModel: body.modelId,
+      keyAlias: flags.keyAlias,
+      apiGroup: flags.apiGroup,
+      keyFingerprint: keyFingerprint(body.apiKey, flags.fingerprintSecret || process.env.KEY_FINGERPRINT_SECRET),
+    };
+    if (flags.platformUrl || process.env.PLATFORM_INTERNAL_URL) {
+      await publishSubmission(submission, { endpoint: flags.platformUrl });
+    } else {
+      const db = new DatabaseSync(dbPathOf(flags));
+      try {
+        migrateDb(db);
+        recordSubmission(db, submission);
+      } finally {
+        db.close();
+      }
+    }
+  }
   let result = started;
   if (flags.wait && !body.sync && runId) result = await waitRun(flags, runId);
   const summary = summarizeRun(result);
@@ -403,6 +428,17 @@ export async function cmdIngestHistory(flags) {
   await ingestWatch(flags);
 }
 
+export async function cmdEnrichSubmissions(flags) {
+  const db = new DatabaseSync(dbPathOf(flags));
+  try {
+    migrateDb(db);
+    printJson(await enrichPendingSubmissions(db, flags), flags.pretty);
+  } finally {
+    db.close();
+  }
+  return 0;
+}
+
 export const COMMANDS = {
   run: cmdRun,
   status: cmdStatus,
@@ -425,13 +461,14 @@ export const COMMANDS = {
   platform: cmdPlatform,
   maintenance: cmdMaintenance,
   "ingest-history": cmdIngestHistory,
+  "enrich-submissions": cmdEnrichSubmissions,
 };
 
 export function usage() {
   return `用法: node src/cli.mjs <命令> [参数] [--pretty]
 
 检测:
-  run --base-url URL --api-key KEY --model ID [--mode quick|full|deep] [--wait]
+  run --base-url URL --api-key KEY --model ID [--mode quick|full|deep] [--wait] [--db PATH]
   status <runId>
   stop <runId>
   retest <runId> --probe-id ID
@@ -465,6 +502,7 @@ export function usage() {
 本地入库（检测纪录，按 id 去重）:
   ingest-history --once [--pretty]
   ingest-history [--watch] [--interval-ms 1800000]
+  enrich-submissions --db PATH [--limit 10]
 
 Key 用 --api-key 或 BL_PROBE_API_KEY，不要写进仓库。`;
 }

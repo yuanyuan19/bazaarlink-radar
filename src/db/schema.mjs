@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -73,6 +73,14 @@ const NORMALIZED_SCHEMA = `
     api_group TEXT,
     request_model TEXT
   );
+  CREATE TABLE IF NOT EXISTS run_enrichment_jobs (
+    run_id TEXT PRIMARY KEY REFERENCES probe_runs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS run_annotations (
     run_id TEXT PRIMARY KEY REFERENCES probe_runs(id) ON DELETE CASCADE,
     note TEXT,
@@ -121,6 +129,7 @@ const NORMALIZED_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_probe_runs_site ON probe_runs(site_id);
   CREATE INDEX IF NOT EXISTS idx_probe_results_model ON probe_results(model_id);
   CREATE INDEX IF NOT EXISTS idx_run_sources_type ON run_sources(source_type);
+  CREATE INDEX IF NOT EXISTS idx_enrichment_jobs_due ON run_enrichment_jobs(status, next_attempt_at);
   CREATE INDEX IF NOT EXISTS idx_daily_day ON site_model_daily(day);
 `;
 
@@ -135,7 +144,6 @@ export function migrateDb(db) {
   dropDeprecatedTables(db);
 
   const current = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version || 0;
-  if (current >= SCHEMA_VERSION) return current;
 
   if (current < 2) {
     // v1 → v2：把旧 ingest_meta 里的轮询参数并入 ingest_state 后整体删除。
@@ -152,13 +160,28 @@ export function migrateDb(db) {
     }
   }
 
-  if (current < 3) {
-    if (!columnExists(db, "ingest_runs", "overlap")) {
-      db.exec("ALTER TABLE ingest_runs ADD COLUMN overlap INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columnExists(db, "ingest_state", "previous_window_ids")) {
-      db.exec("ALTER TABLE ingest_state ADD COLUMN previous_window_ids TEXT");
-    }
+  // Repair by shape as well as version so partially applied/restored databases converge.
+  if (!columnExists(db, "ingest_runs", "overlap")) {
+    db.exec("ALTER TABLE ingest_runs ADD COLUMN overlap INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!columnExists(db, "ingest_state", "previous_window_ids")) {
+    db.exec("ALTER TABLE ingest_state ADD COLUMN previous_window_ids TEXT");
+  }
+
+  if (current >= SCHEMA_VERSION) return current;
+
+  if (current < 4) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS run_enrichment_jobs (
+        run_id TEXT PRIMARY KEY REFERENCES probe_runs(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_enrichment_jobs_due ON run_enrichment_jobs(status, next_attempt_at);
+    `);
   }
 
   db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)").run(SCHEMA_VERSION, new Date().toISOString());

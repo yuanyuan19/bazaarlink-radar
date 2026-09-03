@@ -4,6 +4,12 @@
 
 Origin: `https://bazaarlink.ai`。
 
+## 本项目内部接口
+
+`POST /internal/submissions` 由镜像站在官方成功返回 `runId` 后调用，只接受 `runId`、`baseUrl`、`requestModel`、时间和非敏感分组字段。这是本机服务之间的入库入口，不校验令牌。API Key 不得发送到该接口。
+
+接口只持久化检测摘要和待补全任务，立即返回 `202`。`enrich-submissions` 命令异步读取官方 `/api/probe/history/{id}` 并补全结果，失败按持久化退避时间重试。
+
 ## Skill 已写、探通
 
 | 方法 | 路径 | 结果 |

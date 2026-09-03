@@ -18,7 +18,7 @@ function siteFor(db, item, now) {
   return db.prepare("SELECT id FROM sites WHERE host = ?").get(host).id;
 }
 
-export function savePublicObservation(db, item, now) {
+export function savePublicObservation(db, item, now, { sourceType = "public_history" } = {}) {
   if (!item?.id) return false;
   const siteId = siteFor(db, item, now);
   db.prepare(`
@@ -72,10 +72,81 @@ export function savePublicObservation(db, item, now) {
     item.errorCount ?? null, item.totalInputTokens ?? null, item.totalOutputTokens ?? null,
   );
 
+  if (sourceType) {
+    db.prepare(`
+      INSERT INTO run_sources(run_id, source_type, first_seen_at, last_seen_at)
+      VALUES(?, ?, ?, ?)
+      ON CONFLICT(run_id, source_type) DO UPDATE SET last_seen_at = excluded.last_seen_at
+    `).run(String(item.id), sourceType, now, now);
+  }
+  return true;
+}
+
+export function saveMySubmission(db, submission, now = new Date().toISOString()) {
+  if (!submission?.runId || !submission?.baseUrl) return false;
+  const runId = String(submission.runId);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const siteId = siteFor(db, { baseUrl: submission.baseUrl }, now);
+    db.prepare(`
+      INSERT INTO probe_runs(
+        id, base_url, site_id, claimed_model_id, created_at,
+        source_report_url, parser_version, ingested_at
+      ) VALUES(?, ?, ?, ?, ?, ?, 'submission-v1', ?)
+      ON CONFLICT(id) DO UPDATE SET
+        base_url = COALESCE(probe_runs.base_url, excluded.base_url),
+        site_id = COALESCE(probe_runs.site_id, excluded.site_id),
+        claimed_model_id = COALESCE(probe_runs.claimed_model_id, excluded.claimed_model_id),
+        created_at = COALESCE(probe_runs.created_at, excluded.created_at),
+        source_report_url = COALESCE(probe_runs.source_report_url, excluded.source_report_url)
+    `).run(
+      runId, submission.baseUrl, siteId, submission.requestModel ?? null,
+      submission.capturedAt ?? now,
+      `https://bazaarlink.ai/probe?runId=${encodeURIComponent(runId)}`,
+      now,
+    );
+    db.prepare(`
+      INSERT INTO my_submissions(run_id, captured_at, key_alias, key_fingerprint, api_group, request_model)
+      VALUES(?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run_id) DO UPDATE SET
+        key_alias = COALESCE(excluded.key_alias, my_submissions.key_alias),
+        key_fingerprint = COALESCE(excluded.key_fingerprint, my_submissions.key_fingerprint),
+        api_group = COALESCE(excluded.api_group, my_submissions.api_group),
+        request_model = COALESCE(excluded.request_model, my_submissions.request_model)
+    `).run(
+      runId, submission.capturedAt ?? now, submission.keyAlias ?? null,
+      submission.keyFingerprint ?? null, submission.apiGroup ?? null,
+      submission.requestModel ?? null,
+    );
+    db.prepare(`
+      INSERT INTO run_sources(run_id, source_type, first_seen_at, last_seen_at)
+      VALUES(?, 'my_submission', ?, ?)
+      ON CONFLICT(run_id, source_type) DO UPDATE SET last_seen_at = excluded.last_seen_at
+    `).run(runId, now, now);
+    db.prepare(`
+      INSERT INTO run_enrichment_jobs(run_id, status, attempts, next_attempt_at, updated_at)
+      VALUES(?, 'pending', 0, ?, ?)
+      ON CONFLICT(run_id) DO UPDATE SET
+        status = CASE WHEN run_enrichment_jobs.status = 'completed' THEN 'completed' ELSE 'pending' END,
+        next_attempt_at = CASE WHEN run_enrichment_jobs.status = 'completed' THEN run_enrichment_jobs.next_attempt_at ELSE excluded.next_attempt_at END,
+        updated_at = excluded.updated_at
+    `).run(runId, now, now);
+    db.exec("COMMIT");
+    return true;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function saveRunDetails(db, item, now = new Date().toISOString()) {
+  if (!item?.id && !item?.runId) return false;
+  const normalized = { ...item, id: String(item.id || item.runId) };
+  savePublicObservation(db, normalized, now, { sourceType: null });
   db.prepare(`
-    INSERT INTO run_sources(run_id, source_type, first_seen_at, last_seen_at)
-    VALUES(?, 'public_history', ?, ?)
-    ON CONFLICT(run_id, source_type) DO UPDATE SET last_seen_at = excluded.last_seen_at
-  `).run(String(item.id), now, now);
+    UPDATE run_enrichment_jobs
+    SET status = 'completed', last_error = NULL, updated_at = ?
+    WHERE run_id = ?
+  `).run(now, normalized.id);
   return true;
 }

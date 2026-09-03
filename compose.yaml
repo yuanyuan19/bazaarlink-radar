@@ -31,6 +31,10 @@ services:
     command: ["node", "src/cli.mjs", "serve", "--port", "8787"]
     expose:
       - "8787"
+    environment:
+      MIRROR_HOST: 0.0.0.0
+      PLATFORM_INTERNAL_URL: http://platform:3000
+      KEY_FINGERPRINT_SECRET: ${KEY_FINGERPRINT_SECRET:-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/__bl/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
       interval: 30s
@@ -41,7 +45,7 @@ services:
     build: .
     profiles: ["jobs"]
     restart: "no"
-    command: ["node", "src/cli.mjs", "ingest-history", "--once", "--if-due", "--db", "/app/data/probe-history.sqlite", "--no-csv"]
+    command: ["sh", "-c", "node src/cli.mjs ingest-history --once --if-due --db /app/data/probe-history.sqlite --no-csv && node src/cli.mjs enrich-submissions --db /app/data/probe-history.sqlite --limit 10"]
     volumes:
       - ./data:/app/data
 

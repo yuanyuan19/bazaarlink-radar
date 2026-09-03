@@ -5,6 +5,7 @@ import Fastify from "fastify";
 import { DatabaseSync } from "node:sqlite";
 import { dbPathOf } from "../ingest/history.mjs";
 import { migrateDb } from "../db/schema.mjs";
+import { recordSubmission } from "../core/submissions.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, "public");
@@ -99,6 +100,32 @@ function registerRoutes(app, db) {
     const state = db.prepare("SELECT last_success_at, last_error FROM ingest_state WHERE id = 1").get();
     const count = db.prepare("SELECT COUNT(*) AS n FROM probe_runs").get().n;
     return { status: "ok", database: "ok", records: count, lastSuccessfulIngestAt: state?.last_success_at || null, lastError: state?.last_error || null };
+  });
+
+  app.post("/internal/submissions", {
+    schema: {
+      body: {
+        type: "object",
+        additionalProperties: false,
+        required: ["runId", "baseUrl"],
+        properties: {
+          runId: { type: "string", minLength: 1, maxLength: 500 },
+          baseUrl: { type: "string", minLength: 1, maxLength: 500 },
+          requestModel: { type: "string", maxLength: 500 },
+          capturedAt: { type: "string", maxLength: 100 },
+          keyAlias: { type: "string", maxLength: 500 },
+          keyFingerprint: { type: "string", maxLength: 500 },
+          apiGroup: { type: "string", maxLength: 500 },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    try {
+      const submission = recordSubmission(db, request.body);
+      return reply.code(202).send({ accepted: true, runId: submission.runId });
+    } catch (error) {
+      return reply.code(400).send({ error: error.message });
+    }
   });
 
   app.get("/api/my-runs", async (request) => {
@@ -271,7 +298,7 @@ function registerRoutes(app, db) {
 }
 
 export function buildPlatform(flags = {}) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, ajv: { customOptions: { removeAdditional: false } } });
   const db = openPlatformDb(flags);
   app.addHook("onClose", async () => db.close());
   registerRoutes(app, db);
