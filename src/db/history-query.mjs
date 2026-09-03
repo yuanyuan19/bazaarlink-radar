@@ -1,5 +1,4 @@
 import { displayScore } from "../core/probe-run.mjs";
-import { hostFromUrl } from "../util.mjs";
 
 export function numberParam(value, fallback, min, max) {
   const parsed = Number(value);
@@ -22,10 +21,11 @@ function normalizeApiScore(score) {
   return n <= 1 ? n : n / 100;
 }
 
+// 输出与官方 /api/probe/history 每一项同形，官方 React 组件直接渲染。
 export function toHistoryApiRow(row) {
   return {
     id: row.id,
-    runUuid: row.run_uuid || null,
+    runId: row.run_uuid || undefined,
     baseUrl: row.base_url,
     modelId: row.claimed_model_id || row.request_model || row.model_id || null,
     score: normalizeApiScore(row.score),
@@ -33,14 +33,36 @@ export function toHistoryApiRow(row) {
     identityConfirmed: row.identity_confirmed === 1,
     confirmedMismatch: row.confirmed_mismatch === 1,
     mostSimilarDisplayName: row.actual_model || null,
-    identityOnly: false,
     errorCount: row.error_count ?? 0,
-    totalProbes: null,
-    doneProbes: null,
-    host: row.host || hostFromUrl(row.base_url),
-    displayScore: displayScore(row.score),
-    source: "local",
   };
+}
+
+export function displayScoreOf(item) {
+  return displayScore(item?.score);
+}
+
+export function isRunningItem(item) {
+  return item?.score === null && Number(item?.totalProbes) > 0;
+}
+
+export function matchesQuery(item, q) {
+  if (!q) return true;
+  const needle = String(q).toLowerCase();
+  return `${item.baseUrl || ""} ${item.modelId || ""}`.toLowerCase().includes(needle);
+}
+
+export function matchesBand(item, band) {
+  const b = String(band || "all");
+  if (b === "all") return true;
+  const running = isRunningItem(item);
+  if (b === "running") return running;
+  if (running) return false;
+  const ds = displayScoreOf(item);
+  if (ds == null) return false;
+  if (b === "80") return ds >= 80;
+  if (b === "50") return ds >= 50;
+  if (b === "low") return ds < 50;
+  return true;
 }
 
 function bandClause(band) {
@@ -53,77 +75,81 @@ function bandClause(band) {
     case "low":
       return `${score} IS NOT NULL AND ${score} < 50`;
     case "running":
-      // 本地库只存已完成的公开记录，进行中的行只来自官方窗口。
       return "0";
     default:
       return null;
   }
 }
 
-// 游标是 "<created_at>|<id>"，按 (created_at DESC, id DESC) 严格单调，翻页不重不漏。
-export function encodeCursor(row) {
-  if (!row) return null;
-  return `${row.createdAt || ""}|${row.id}`;
-}
-
-export function decodeCursor(value) {
-  if (!value) return null;
-  const raw = String(value);
-  const at = raw.lastIndexOf("|");
-  if (at < 0) return null;
-  const createdAt = raw.slice(0, at);
-  const id = raw.slice(at + 1);
-  if (!id) return null;
-  return { createdAt, id };
-}
-
-export function queryPublicHistory(db, options = {}) {
-  const { q, band = "all", after } = options;
-  const limit = numberParam(options.limit, 50, 1, 200);
-
+function buildWhere({ q, band, excludeIds }) {
   const conditions = [
     "EXISTS (SELECT 1 FROM run_sources src WHERE src.run_id = pr.id AND src.source_type = 'public_history')",
   ];
   const params = [];
-
   if (q) {
-    conditions.push("(pr.id LIKE ? ESCAPE '\\' OR s.host LIKE ? ESCAPE '\\' OR pr.claimed_model_id LIKE ? ESCAPE '\\' OR COALESCE(rr.actual_model, '') LIKE ? ESCAPE '\\' OR COALESCE(rr.model_id, '') LIKE ? ESCAPE '\\' OR pr.base_url LIKE ? ESCAPE '\\')");
-    params.push(like(q), like(q), like(q), like(q), like(q), like(q));
+    conditions.push("(pr.base_url LIKE ? ESCAPE '\\' OR pr.claimed_model_id LIKE ? ESCAPE '\\' OR s.host LIKE ? ESCAPE '\\')");
+    params.push(like(q), like(q), like(q));
   }
-
   const bandSql = bandClause(band);
   if (bandSql) conditions.push(bandSql);
-
-  const cursor = decodeCursor(after);
-  if (cursor) {
-    conditions.push("(COALESCE(pr.created_at, '') < ? OR (COALESCE(pr.created_at, '') = ? AND pr.id < ?))");
-    params.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  const ids = [...new Set((excludeIds || []).map(String).filter(Boolean))].slice(0, 400);
+  if (ids.length) {
+    conditions.push(`pr.id NOT IN (${ids.map(() => "?").join(",")}) AND (pr.run_uuid IS NULL OR pr.run_uuid NOT IN (${ids.map(() => "?").join(",")}))`);
+    params.push(...ids, ...ids);
   }
-
-  const rows = db.prepare(`
-    SELECT pr.id, pr.run_uuid, pr.base_url, pr.claimed_model_id, pr.created_at,
-           s.host, rr.model_id, rr.actual_model, rr.verdict, rr.score,
-           rr.identity_confirmed, rr.confirmed_mismatch, rr.error_count,
-           ms.request_model
-    FROM probe_runs pr
-    LEFT JOIN sites s ON s.id = pr.site_id
-    LEFT JOIN probe_results rr ON rr.run_id = pr.id
-    LEFT JOIN my_submissions ms ON ms.run_id = pr.id
-    WHERE ${conditions.join(" AND ")}
-    ORDER BY COALESCE(pr.created_at, '') DESC, pr.id DESC
-    LIMIT ?
-  `).all(...params, limit + 1);
-
-  const hasMore = rows.length > limit;
-  const page = rows.slice(0, limit).map(toHistoryApiRow);
-  return {
-    history: page,
-    limit,
-    hasMore,
-    nextCursor: hasMore ? encodeCursor(page[page.length - 1]) : null,
-  };
+  return { where: `WHERE ${conditions.join(" AND ")}`, params };
 }
 
-export function bootPublicHistory(db, limit = 48) {
-  return queryPublicHistory(db, { limit, band: "all" });
+const JOINS = `
+  FROM probe_runs pr
+  LEFT JOIN sites s ON s.id = pr.site_id
+  LEFT JOIN probe_results rr ON rr.run_id = pr.id
+  LEFT JOIN my_submissions ms ON ms.run_id = pr.id
+`;
+
+export function countPublicHistory(db, options = {}) {
+  const { where, params } = buildWhere(options);
+  return db.prepare(`SELECT COUNT(*) AS n ${JOINS} ${where}`).get(...params).n;
+}
+
+export function queryPublicHistory(db, options = {}) {
+  const limit = numberParam(options.limit, 50, 1, 200);
+  const offset = numberParam(options.offset, 0, 0, 10_000_000);
+  const { where, params } = buildWhere(options);
+  const rows = db.prepare(`
+    SELECT pr.id, pr.run_uuid, pr.base_url, pr.claimed_model_id, pr.created_at,
+           rr.model_id, rr.actual_model, rr.score, rr.identity_confirmed, rr.confirmed_mismatch, rr.error_count,
+           ms.request_model
+    ${JOINS}
+    ${where}
+    ORDER BY COALESCE(pr.created_at, '') DESC, pr.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+  return rows.map(toHistoryApiRow);
+}
+
+// 合并页：官方当前窗口（按 q/band 过滤）排前面，本地库里不在官方集合内的记录接在后面。
+export function mergedHistoryPage(db, officialRows, options = {}) {
+  const limit = numberParam(options.limit, 50, 1, 200);
+  const page = numberParam(options.page, 1, 1, 100_000);
+  const q = String(options.q || "").trim();
+  const band = String(options.band || "all");
+  const official = (officialRows || []).filter((item) => item?.id && matchesQuery(item, q) && matchesBand(item, band));
+  const excludeIds = [];
+  for (const item of officialRows || []) {
+    if (item?.id) excludeIds.push(String(item.id));
+    if (item?.runId) excludeIds.push(String(item.runId));
+  }
+  const localTotal = band === "running" ? 0 : countPublicHistory(db, { q, band, excludeIds });
+  const total = official.length + localTotal;
+  const pages = Math.max(1, Math.ceil(total / limit));
+  const offset = (Math.min(page, pages) - 1) * limit;
+
+  let history = official.slice(offset, offset + limit);
+  const need = limit - history.length;
+  if (need > 0 && localTotal > 0) {
+    const localOffset = Math.max(0, offset - official.length);
+    history = history.concat(queryPublicHistory(db, { q, band, excludeIds, limit: need, offset: localOffset }));
+  }
+  return { history, page: Math.min(page, pages), pages, total, limit, officialCount: official.length, localCount: localTotal };
 }

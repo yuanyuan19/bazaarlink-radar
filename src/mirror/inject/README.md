@@ -14,15 +14,12 @@
 
 ## 针对性替换：公开检测（history Tab）表
 
-官方 `/api/probe/history` 最多约 100 条且不翻页。镜像在后台定时采集进 SQLite，并在 history Tab：
+官方 `/api/probe/history` 最多约 100 条且不翻页。镜像在后台定时采集进 SQLite，并在 history Tab **不改一个像素**：表格完全由官方 React 代码渲染，我们只换数据、加一条翻页。
 
-1. **首屏**：`/api/probe/history` 改为 `limit=50`；通过 `perf.js` 的 `__blOnResponse` 钩子拿到官方每次刷新的窗口（fetch 与 XHR 都覆盖），镜像对该接口只缓存 15s。
-2. **合并**：官方行优先，本地行按 `id` 与 `runUuid` 双键去重后拼接，按时间倒序。
-3. **克隆**：找 6 列表格，复制表头 / colgroup / 首行 inline style，隐藏官方 tbody。
-4. **搜索**：沿用官方 URL 筛选框与分数 band pills；每个 `q|band` 组合各自维护一条服务端游标（`/__bl/history.json?after=`），切换时从头拉、切回时复用。`进行中` 只过滤官方行。
-5. **懒渲染**：虚拟滚动，滚到底继续拉下一页；表尾状态行显示 `加载中… / 已到底 · 共 N 条 / 加载失败`。
-6. **Tab 切换**：脚本常驻，包住 `pushState/replaceState` 与 `popstate`；从 Pulse 切到检测记录也能接管，切走时还原官方表。
-7. **Fail-open**：找不到 6 列表格就不接管。
+1. **数据**：官方页面首屏请求 `/api/probe/history?limit=50`，被 `perf.js` 改写为 `/__bl/history-page.json?page=1&q=&band=`。镜像服务端把官方窗口（缓存 15s）按 q/band 过滤后排前面，再接上本地库里 `id`/`run_uuid` 都不在官方集合里的记录，切成每页 50 条。每一项字段与官方接口同形，官方组件原样渲染。
+2. **翻页**：表格下方加一条翻页（按钮样式从官方 band pills 的 inline style 复制）。点击后拉对应页，通过 React fiber 找到存放 `history` 的 state setter 直接喂入；找不到就把页码存 `sessionStorage` 并刷新，由首屏改写加载。
+3. **搜索 / 分数档**：沿用官方输入框和 pills，变化后从服务端重新拉第 1 页（合并后的全集里搜），官方自带的客户端过滤跑一遍等于空操作。
+4. **不做**：不克隆表格、不虚拟滚动、不自己画行。
 
 其它 Tab、表单、判定树、比价都不替换。
 

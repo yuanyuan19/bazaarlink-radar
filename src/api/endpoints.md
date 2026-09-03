@@ -9,8 +9,7 @@ Origin: `https://bazaarlink.ai`。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/__bl/health` | 镜像与 SQLite 采集状态 |
-| GET | `/__bl/history-boot.json` | 公开检测本地库首屏（默认 48 条），返回 `{ history, hasMore, nextCursor }` |
-| GET | `/__bl/history.json` | 公开检测键集分页（`q`、`band=all|80|50|low`、`limit`、`after=<createdAt>|<id>`）。游标按 `(created_at, id)` 单调递减，不重不漏；与官方窗口的去重在浏览器端按 `id` / `runUuid` 完成 |
+| GET | `/__bl/history-page.json` | 检测记录合并页：`page`、`limit=50`、`q`、`band=all|80|50|low|running`。官方窗口（缓存 15s，过滤后）排前，本地库按 `id`/`run_uuid` 去重后接在后面。返回 `{ history, page, pages, total, officialCount, localCount }`，`history` 每项与官方 `/api/probe/history` 同形 |
 | GET | `/__bl/probe-copy.json` | 官方 Probe 页面文案（供注入脚本复用标签） |
 | GET | `/__bl/pulse-boot.json` | Pulse 首屏 |
 | GET | `/__bl/pulse-index.json` | Pulse 全量索引 |

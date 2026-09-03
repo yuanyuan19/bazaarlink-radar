@@ -78,7 +78,7 @@ node src/cli.mjs serve --port 8787 --db data/cache/probe-history.sqlite
 ```
 
 - **Pulse**：http://127.0.0.1:8787/probe?tab=pulse — 克隆官方 8 列表格 + 虚拟滚动。
-- **公开检测**：http://127.0.0.1:8787/probe?tab=history — 官方当前窗口 + SQLite 里更早的采集记录，合并去重、虚拟滚动、服务端分页搜索。
+- **检测记录**：http://127.0.0.1:8787/probe?tab=history — 与官方页面一模一样，只是记录不止 100 条：官方当前窗口 + SQLite 里更早的采集记录合并去重，每页 50 条，表格下方翻页，搜索和分数档对合并后的全集生效。
 
 镜像把官方 HTML/JS/CSS 拉下来、注入性能补丁，API 原样转发。除了 Pulse 大表和公开检测表，其它区块都是官方原版。
 

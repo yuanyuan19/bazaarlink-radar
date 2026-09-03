@@ -54,7 +54,7 @@ function rewriteHtml(html, localOrigin) {
     .replaceAll("https://www.bazaarlink.ai", localOrigin)
     .replaceAll("https://api.bazaarlink.ai", localOrigin);
   const tags =
-    `<script>window.__blPulseBootP=fetch("/__bl/pulse-boot.json").then(function(r){return r.json()});window.__blPulseIndexP=fetch("/__bl/pulse-index.json").then(function(r){return r.json()});window.__blHistBootP=fetch("/__bl/history-boot.json").then(function(r){return r.json()});</script>` +
+    `<script>window.__blPulseBootP=fetch("/__bl/pulse-boot.json").then(function(r){return r.json()});window.__blPulseIndexP=fetch("/__bl/pulse-index.json").then(function(r){return r.json()});</script>` +
     `<script src="/__bl/perf.js"></script><script src="/__bl/pulse-virt.js"></script><script src="/__bl/history-virt.js"></script>`;
   if (out.includes("</head>")) out = out.replace("</head>", `${tags}</head>`);
   else out = tags + out;
@@ -152,7 +152,7 @@ export function createMirrorServer(flags = {}) {
         res.end(readInject(name));
         return;
       }
-      const historyPayload = handleHistoryRoute(db, url);
+      const historyPayload = await handleHistoryRoute(db, url, { origin });
       if (historyPayload) {
         const out = jsonResponse(historyPayload);
         res.writeHead(out.status, out.headers);

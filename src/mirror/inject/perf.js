@@ -25,8 +25,8 @@
     var raw = String(url || "");
     var path = raw.split("?")[0];
     if (!/\/api\/probe\/history\/?$/.test(path)) return raw;
-    if (/[?&]limit=/.test(raw)) return raw;
-    return raw + (raw.indexOf("?") >= 0 ? "&" : "?") + "limit=50";
+    if (typeof window.__blHistRewrite === "function") return window.__blHistRewrite(raw);
+    return raw;
   }
 
   function rewritePerfUrl(url) {
