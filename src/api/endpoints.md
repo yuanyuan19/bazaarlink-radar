@@ -9,8 +9,8 @@ Origin: `https://bazaarlink.ai`。
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/__bl/health` | 镜像与 SQLite 采集状态 |
-| GET | `/__bl/history-boot.json` | 公开检测本地库首屏（默认 48 条，支持 `excludeIds`） |
-| GET | `/__bl/history.json` | 公开检测分页搜索（`q`、`band`、`offset`、`limit`、`excludeIds`） |
+| GET | `/__bl/history-boot.json` | 公开检测本地库首屏（默认 48 条），返回 `{ history, hasMore, nextCursor }` |
+| GET | `/__bl/history.json` | 公开检测键集分页（`q`、`band=all|80|50|low`、`limit`、`after=<createdAt>|<id>`）。游标按 `(created_at, id)` 单调递减，不重不漏；与官方窗口的去重在浏览器端按 `id` / `runUuid` 完成 |
 | GET | `/__bl/probe-copy.json` | 官方 Probe 页面文案（供注入脚本复用标签） |
 | GET | `/__bl/pulse-boot.json` | Pulse 首屏 |
 | GET | `/__bl/pulse-index.json` | Pulse 全量索引 |
@@ -18,6 +18,19 @@ Origin: `https://bazaarlink.ai`。
 镜像进程内会自动轮询官方 `/api/probe/history` 入库（与 `ingest-history --if-due` 相同逻辑），并周期性执行 `enrich-submissions`。
 
 CLI `run` 写入的摘要直接进 SQLite（`--db PATH`），不再经过独立数据站。
+
+## 两种记录 ID
+
+同一次检测有两个 ID，页面链接 `/probe?runId=` 两种都能打开：
+
+| 格式 | 例子 | 含义 | 出现在 |
+|---|---|---|---|
+| UUID（带横线） | `81f0498a-ddc1-46ac-98d6-26d1b9d55fe7` | 运行任务 `runId`，`POST /api/probe/run` 返回，前端立刻写进地址栏 | 检测进行中的链接、`/api/probe/active`、`/api/probe/run/{id}`（完成后 404） |
+| CUID（`c` 开头 25 位） | `cmtllq9zr013x01pc8yr76g39` | 历史记录 `id`，完成入库时生成 | `/api/probe/history` 列表、检测记录表格的行链接 |
+
+`GET /api/probe/history/{id}` 两种都认，返回体同时带 `id`（CUID）和 `runId`（UUID）。官方前端读到 `?runId=` 后先请求 `run/{id}`，404 再请求 `history/{id}`。
+
+本地库以 **CUID 为主键**，`probe_runs.run_uuid` 存 UUID。CLI 提交时先以 UUID 临时落库，补全拿到官方返回体后 `rekeyRun` 把整条记录及子表换到 CUID 键上，保证一次检测只有一行。
 
 ## Skill 已写、探通
 

@@ -18,22 +18,70 @@ function siteFor(db, item, now) {
   return db.prepare("SELECT id FROM sites WHERE host = ?").get(host).id;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CHILD_TABLES = ["probe_results", "run_sources", "my_submissions", "run_enrichment_jobs", "run_annotations"];
+
+export function isRunUuid(value) {
+  return UUID_RE.test(String(value || ""));
+}
+
+// 自己提交的检测先以 UUID（runId）落库；官方入库后主键变成 CUID（id）。
+// 拿到两者对应关系时把整条记录连同子表换到 CUID 键上，保证一次检测只有一行。
+export function rekeyRun(db, fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return false;
+  const old = db.prepare("SELECT * FROM probe_runs WHERE id = ?").get(String(fromId));
+  if (!old) return false;
+  db.exec("SAVEPOINT rekey_run");
+  try {
+    db.prepare("UPDATE probe_runs SET run_uuid = NULL WHERE id = ?").run(String(fromId));
+    db.prepare(`
+      INSERT INTO probe_runs(id, base_url, site_id, claimed_model_id, created_at, completed_at,
+        source_report_url, raw_payload_ref, parser_version, ingested_at, run_uuid)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        base_url = COALESCE(probe_runs.base_url, excluded.base_url),
+        site_id = COALESCE(probe_runs.site_id, excluded.site_id),
+        claimed_model_id = COALESCE(probe_runs.claimed_model_id, excluded.claimed_model_id),
+        created_at = COALESCE(probe_runs.created_at, excluded.created_at),
+        completed_at = COALESCE(probe_runs.completed_at, excluded.completed_at),
+        run_uuid = COALESCE(probe_runs.run_uuid, excluded.run_uuid)
+    `).run(
+      String(toId), old.base_url, old.site_id, old.claimed_model_id, old.created_at, old.completed_at,
+      `https://bazaarlink.ai/probe?runId=${encodeURIComponent(toId)}`, old.raw_payload_ref, old.parser_version, old.ingested_at,
+      old.run_uuid || (isRunUuid(fromId) ? String(fromId) : null),
+    );
+    for (const table of CHILD_TABLES) {
+      db.prepare(`UPDATE OR IGNORE ${table} SET run_id = ? WHERE run_id = ?`).run(String(toId), String(fromId));
+    }
+    db.prepare("DELETE FROM probe_runs WHERE id = ?").run(String(fromId));
+    db.exec("RELEASE rekey_run");
+    return true;
+  } catch (error) {
+    db.exec("ROLLBACK TO rekey_run");
+    db.exec("RELEASE rekey_run");
+    throw error;
+  }
+}
+
 export function savePublicObservation(db, item, now, { sourceType = "public_history" } = {}) {
   if (!item?.id) return false;
+  const runUuid = item.runId && isRunUuid(item.runId) && String(item.runId) !== String(item.id) ? String(item.runId) : null;
+  if (runUuid) rekeyRun(db, runUuid, String(item.id));
   const siteId = siteFor(db, item, now);
   db.prepare(`
     INSERT INTO probe_runs(
       id, base_url, site_id, claimed_model_id, created_at,
-      completed_at, source_report_url, raw_payload_ref, parser_version, ingested_at
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      completed_at, source_report_url, raw_payload_ref, parser_version, ingested_at, run_uuid
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       base_url = COALESCE(excluded.base_url, probe_runs.base_url),
       site_id = COALESCE(excluded.site_id, probe_runs.site_id),
       claimed_model_id = COALESCE(excluded.claimed_model_id, probe_runs.claimed_model_id),
-      completed_at = COALESCE(excluded.completed_at, probe_runs.completed_at)
+      completed_at = COALESCE(excluded.completed_at, probe_runs.completed_at),
+      run_uuid = COALESCE(probe_runs.run_uuid, excluded.run_uuid)
   `).run(
     String(item.id), item.baseUrl ?? null, siteId, item.modelId ?? null, item.createdAt ?? null,
-    item.completedAt ?? null, `https://bazaarlink.ai/probe?runId=${encodeURIComponent(item.id)}`, null, "history-v1", now,
+    item.completedAt ?? null, `https://bazaarlink.ai/probe?runId=${encodeURIComponent(item.id)}`, null, "history-v1", now, runUuid,
   );
 
   const modelId = item.modelId ?? item.v4ModelId ?? item.v3fModelId ?? null;
@@ -91,19 +139,20 @@ export function saveMySubmission(db, submission, now = new Date().toISOString())
     db.prepare(`
       INSERT INTO probe_runs(
         id, base_url, site_id, claimed_model_id, created_at,
-        source_report_url, parser_version, ingested_at
-      ) VALUES(?, ?, ?, ?, ?, ?, 'submission-v1', ?)
+        source_report_url, parser_version, ingested_at, run_uuid
+      ) VALUES(?, ?, ?, ?, ?, ?, 'submission-v1', ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         base_url = COALESCE(probe_runs.base_url, excluded.base_url),
         site_id = COALESCE(probe_runs.site_id, excluded.site_id),
         claimed_model_id = COALESCE(probe_runs.claimed_model_id, excluded.claimed_model_id),
         created_at = COALESCE(probe_runs.created_at, excluded.created_at),
-        source_report_url = COALESCE(probe_runs.source_report_url, excluded.source_report_url)
+        source_report_url = COALESCE(probe_runs.source_report_url, excluded.source_report_url),
+        run_uuid = COALESCE(probe_runs.run_uuid, excluded.run_uuid)
     `).run(
       runId, submission.baseUrl, siteId, submission.requestModel ?? null,
       submission.capturedAt ?? now,
       `https://bazaarlink.ai/probe?runId=${encodeURIComponent(runId)}`,
-      now,
+      now, isRunUuid(runId) ? runId : null,
     );
     db.prepare(`
       INSERT INTO my_submissions(run_id, captured_at, key_alias, key_fingerprint, api_group, request_model)
@@ -166,7 +215,15 @@ export function saveSiteAnnotation(db, host, patch = {}) {
 export function saveRunDetails(db, item, now = new Date().toISOString()) {
   if (!item?.id && !item?.runId) return false;
   const normalized = { ...item, id: String(item.id || item.runId) };
-  savePublicObservation(db, normalized, now, { sourceType: null });
+  db.exec("SAVEPOINT run_details");
+  try {
+    savePublicObservation(db, normalized, now, { sourceType: null });
+    db.exec("RELEASE run_details");
+  } catch (error) {
+    db.exec("ROLLBACK TO run_details");
+    db.exec("RELEASE run_details");
+    throw error;
+  }
   db.prepare(`
     UPDATE run_enrichment_jobs
     SET status = 'completed', last_error = NULL, updated_at = ?

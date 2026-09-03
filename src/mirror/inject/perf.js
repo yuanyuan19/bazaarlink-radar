@@ -34,6 +34,63 @@
     return rewriteHistoryUrl(next);
   }
 
+  /* ---------- 0. response hooks for other inject scripts ---------- */
+
+  var responseHooks = [];
+  window.__blOnResponse = function (pattern, fn) {
+    responseHooks.push({ pattern: pattern, fn: fn });
+  };
+
+  function pathOf(url) {
+    try {
+      return new URL(String(url), location.href).pathname;
+    } catch (e) {
+      return String(url || "").split("?")[0];
+    }
+  }
+
+  function notifyJson(url, text) {
+    var path = pathOf(url);
+    var data = null;
+    var parsed = false;
+    for (var i = 0; i < responseHooks.length; i++) {
+      if (!responseHooks[i].pattern.test(path)) continue;
+      if (!parsed) {
+        parsed = true;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          return;
+        }
+      }
+      try {
+        responseHooks[i].fn(data, url);
+      } catch (e) {}
+    }
+  }
+
+  function wantsHook(url) {
+    var path = pathOf(url);
+    for (var i = 0; i < responseHooks.length; i++) {
+      if (responseHooks[i].pattern.test(path)) return true;
+    }
+    return false;
+  }
+
+  function tapResponse(url, res) {
+    if (!res || !res.ok || !wantsHook(url)) return res;
+    try {
+      res
+        .clone()
+        .text()
+        .then(function (text) {
+          notifyJson(url, text);
+        })
+        .catch(function () {});
+    } catch (e) {}
+    return res;
+  }
+
   /* ---------- 1. stagger same-origin API GETs ---------- */
 
   var active = 0;
@@ -96,7 +153,11 @@
         url = next;
       }
       var method = (init && init.method) || (input && input.method) || "GET";
-      if (!deferrable(method, url)) return nativeFetch(input, init);
+      if (!deferrable(method, url)) {
+        return nativeFetch(input, init).then(function (res) {
+          return tapResponse(url, res);
+        });
+      }
       return slot().then(function () {
         var p;
         try {
@@ -108,7 +169,7 @@
         return p.then(
           function (res) {
             settle();
-            return res;
+            return tapResponse(url, res);
           },
           function (err) {
             settle();
@@ -131,6 +192,11 @@
         xhr.__blDefer = deferrable(method, xhr.__blUrl);
         return open.apply(xhr, arguments);
       };
+      xhr.addEventListener("load", function () {
+        if (xhr.status >= 200 && xhr.status < 300 && wantsHook(xhr.__blUrl) && typeof xhr.responseText === "string") {
+          notifyJson(xhr.__blUrl, xhr.responseText);
+        }
+      });
       xhr.send = function () {
         if (!xhr.__blDefer) return send.apply(xhr, arguments);
         var args = arguments;

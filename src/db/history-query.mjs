@@ -22,70 +22,64 @@ function normalizeApiScore(score) {
   return n <= 1 ? n : n / 100;
 }
 
-function isRunningRow(row) {
-  if (row.done_probes != null && row.total_probes != null) {
-    return Number(row.done_probes) < Number(row.total_probes);
-  }
-  if (row.enrichment_status === "pending" || row.enrichment_status === "running") return true;
-  return row.verdict == null && row.is_mine === 1;
-}
-
 export function toHistoryApiRow(row) {
-  const running = isRunningRow(row);
-  const scoreRaw = row.score;
   return {
     id: row.id,
+    runUuid: row.run_uuid || null,
     baseUrl: row.base_url,
     modelId: row.claimed_model_id || row.request_model || row.model_id || null,
-    score: normalizeApiScore(scoreRaw),
+    score: normalizeApiScore(row.score),
     createdAt: row.created_at,
     identityConfirmed: row.identity_confirmed === 1,
     confirmedMismatch: row.confirmed_mismatch === 1,
     mostSimilarDisplayName: row.actual_model || null,
-    identityOnly: row.identity_only === 1,
+    identityOnly: false,
     errorCount: row.error_count ?? 0,
-    totalProbes: row.total_probes ?? null,
-    doneProbes: running ? row.done_probes ?? 0 : row.done_probes ?? null,
+    totalProbes: null,
+    doneProbes: null,
     host: row.host || hostFromUrl(row.base_url),
-    displayScore: displayScore(scoreRaw),
+    displayScore: displayScore(row.score),
     source: "local",
   };
 }
 
-function bandConditions(band) {
+function bandClause(band) {
   const score = scoreExpr();
   switch (String(band || "all")) {
     case "80":
-      return [`${score} >= 80`, []];
+      return `${score} >= 80`;
     case "50":
-      return [`${score} >= 50`, []];
+      return `${score} >= 50`;
     case "low":
-      return [`${score} < 50 AND ${score} IS NOT NULL`, []];
+      return `${score} IS NOT NULL AND ${score} < 50`;
     case "running":
-      return ["(rr.verdict IS NULL OR ej.status IN ('pending', 'running'))", []];
+      // 本地库只存已完成的公开记录，进行中的行只来自官方窗口。
+      return "0";
     default:
-      return [null, []];
+      return null;
   }
 }
 
-function excludeIdConditions(excludeIds) {
-  const ids = [...new Set((excludeIds || []).map(String).filter(Boolean))];
-  if (!ids.length) return { clause: "", params: [] };
-  const limited = ids.slice(0, 500);
-  return {
-    clause: `pr.id NOT IN (${limited.map(() => "?").join(",")})`,
-    params: limited,
-  };
+// 游标是 "<created_at>|<id>"，按 (created_at DESC, id DESC) 严格单调，翻页不重不漏。
+export function encodeCursor(row) {
+  if (!row) return null;
+  return `${row.createdAt || ""}|${row.id}`;
+}
+
+export function decodeCursor(value) {
+  if (!value) return null;
+  const raw = String(value);
+  const at = raw.lastIndexOf("|");
+  if (at < 0) return null;
+  const createdAt = raw.slice(0, at);
+  const id = raw.slice(at + 1);
+  if (!id) return null;
+  return { createdAt, id };
 }
 
 export function queryPublicHistory(db, options = {}) {
-  const {
-    q,
-    band = "all",
-    limit = 50,
-    offset = 0,
-    excludeIds = [],
-  } = options;
+  const { q, band = "all", after } = options;
+  const limit = numberParam(options.limit, 50, 1, 200);
 
   const conditions = [
     "EXISTS (SELECT 1 FROM run_sources src WHERE src.run_id = pr.id AND src.source_type = 'public_history')",
@@ -97,46 +91,39 @@ export function queryPublicHistory(db, options = {}) {
     params.push(like(q), like(q), like(q), like(q), like(q), like(q));
   }
 
-  const [bandClause] = bandConditions(band);
-  if (bandClause) conditions.push(bandClause);
+  const bandSql = bandClause(band);
+  if (bandSql) conditions.push(bandSql);
 
-  const exclude = excludeIdConditions(excludeIds);
-  if (exclude.clause) {
-    conditions.push(exclude.clause);
-    params.push(...exclude.params);
+  const cursor = decodeCursor(after);
+  if (cursor) {
+    conditions.push("(COALESCE(pr.created_at, '') < ? OR (COALESCE(pr.created_at, '') = ? AND pr.id < ?))");
+    params.push(cursor.createdAt, cursor.createdAt, cursor.id);
   }
 
-  const where = `WHERE ${conditions.join(" AND ")}`;
-  const joins = `
+  const rows = db.prepare(`
+    SELECT pr.id, pr.run_uuid, pr.base_url, pr.claimed_model_id, pr.created_at,
+           s.host, rr.model_id, rr.actual_model, rr.verdict, rr.score,
+           rr.identity_confirmed, rr.confirmed_mismatch, rr.error_count,
+           ms.request_model
     FROM probe_runs pr
     LEFT JOIN sites s ON s.id = pr.site_id
     LEFT JOIN probe_results rr ON rr.run_id = pr.id
     LEFT JOIN my_submissions ms ON ms.run_id = pr.id
-    LEFT JOIN run_enrichment_jobs ej ON ej.run_id = pr.id
-  `;
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY COALESCE(pr.created_at, '') DESC, pr.id DESC
+    LIMIT ?
+  `).all(...params, limit + 1);
 
-  const rows = db.prepare(`
-    SELECT pr.id, pr.base_url, pr.claimed_model_id, pr.created_at,
-           s.host, rr.model_id, rr.actual_model, rr.verdict, rr.score,
-           rr.identity_confirmed, rr.confirmed_mismatch, rr.error_count,
-           ms.request_model, ej.status AS enrichment_status,
-           CASE WHEN ms.run_id IS NULL THEN 0 ELSE 1 END AS is_mine,
-           NULL AS identity_only, NULL AS total_probes, NULL AS done_probes
-    ${joins}
-    ${where}
-    ORDER BY pr.created_at DESC, pr.id DESC
-    LIMIT ? OFFSET ?
-  `).all(...params, limit, offset);
-
-  const total = db.prepare(`SELECT COUNT(*) AS n ${joins} ${where}`).get(...params).n;
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit).map(toHistoryApiRow);
   return {
-    history: rows.map(toHistoryApiRow),
-    total,
-    offset,
+    history: page,
     limit,
+    hasMore,
+    nextCursor: hasMore ? encodeCursor(page[page.length - 1]) : null,
   };
 }
 
-export function bootPublicHistory(db, limit = 48, excludeIds = []) {
-  return queryPublicHistory(db, { limit, offset: 0, excludeIds, band: "all" });
+export function bootPublicHistory(db, limit = 48) {
+  return queryPublicHistory(db, { limit, band: "all" });
 }

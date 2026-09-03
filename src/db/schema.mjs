@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -26,7 +26,8 @@ const NORMALIZED_SCHEMA = `
     source_report_url TEXT,
     raw_payload_ref TEXT,
     parser_version TEXT,
-    ingested_at TEXT NOT NULL
+    ingested_at TEXT NOT NULL,
+    run_uuid TEXT
   );
   CREATE TABLE IF NOT EXISTS probe_results (
     run_id TEXT PRIMARY KEY REFERENCES probe_runs(id) ON DELETE CASCADE,
@@ -127,6 +128,7 @@ const NORMALIZED_SCHEMA = `
   );
   INSERT OR IGNORE INTO ingest_state(id) VALUES (1);
   CREATE INDEX IF NOT EXISTS idx_probe_runs_created ON probe_runs(created_at);
+  CREATE INDEX IF NOT EXISTS idx_probe_runs_created_id ON probe_runs(created_at DESC, id DESC);
   CREATE INDEX IF NOT EXISTS idx_probe_runs_site ON probe_runs(site_id);
   CREATE INDEX IF NOT EXISTS idx_probe_results_model ON probe_results(model_id);
   CREATE INDEX IF NOT EXISTS idx_run_sources_type ON run_sources(source_type);
@@ -171,6 +173,11 @@ export function migrateDb(db) {
   if (!columnExists(db, "sites", "is_favorite")) {
     db.exec("ALTER TABLE sites ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0");
   }
+  if (!columnExists(db, "probe_runs", "run_uuid")) {
+    db.exec("ALTER TABLE probe_runs ADD COLUMN run_uuid TEXT");
+  }
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_probe_runs_uuid ON probe_runs(run_uuid) WHERE run_uuid IS NOT NULL");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_probe_runs_created_id ON probe_runs(created_at DESC, id DESC)");
 
   if (current >= SCHEMA_VERSION) return current;
 

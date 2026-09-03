@@ -28,11 +28,17 @@ const HOP = new Set([
 
 const getCache = new Map();
 const CACHE_MS = 60_000;
+// 检测记录列表是 history Tab 最需要新鲜度的接口，单独缩短缓存。
+const HISTORY_CACHE_MS = 15_000;
+
+function cacheTtl(urlPath) {
+  return /^\/api\/probe\/history\/?$/.test(urlPath) ? HISTORY_CACHE_MS : CACHE_MS;
+}
 
 function cacheSet(key, entry) {
   const now = Date.now();
   for (const [k, v] of getCache) {
-    if (now - v.at >= CACHE_MS) getCache.delete(k);
+    if (now - v.at >= (v.ttl || CACHE_MS)) getCache.delete(k);
   }
   getCache.set(key, entry);
 }
@@ -225,7 +231,7 @@ export function createMirrorServer(flags = {}) {
       const cacheKey = req.method + " " + url.pathname + url.search;
       if (!noCache && shouldCache(req.method, url.pathname)) {
         const hit = getCache.get(cacheKey);
-        if (hit && Date.now() - hit.at < CACHE_MS) {
+        if (hit && Date.now() - hit.at < (hit.ttl || CACHE_MS)) {
           res.writeHead(hit.status, hit.headers);
           res.end(hit.body);
           return;
@@ -283,7 +289,7 @@ export function createMirrorServer(flags = {}) {
 
       const cacheLimit = 24_000_000;
       if (!noCache && shouldCache(req.method, url.pathname) && upstream.status === 200 && body.length < cacheLimit) {
-        cacheSet(cacheKey, { at: Date.now(), status: upstream.status, headers: outHeaders, body });
+        cacheSet(cacheKey, { at: Date.now(), ttl: cacheTtl(url.pathname), status: upstream.status, headers: outHeaders, body });
       }
 
       res.writeHead(upstream.status, outHeaders);
