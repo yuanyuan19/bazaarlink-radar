@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -55,6 +55,7 @@ const NORMALIZED_SCHEMA = `
     first_seen_at TEXT,
     last_seen_at TEXT,
     note TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0,
     is_hidden INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS models (
@@ -166,6 +167,9 @@ export function migrateDb(db) {
   }
   if (!columnExists(db, "ingest_state", "previous_window_ids")) {
     db.exec("ALTER TABLE ingest_state ADD COLUMN previous_window_ids TEXT");
+  }
+  if (!columnExists(db, "sites", "is_favorite")) {
+    db.exec("ALTER TABLE sites ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0");
   }
 
   if (current >= SCHEMA_VERSION) return current;

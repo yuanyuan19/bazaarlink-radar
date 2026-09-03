@@ -139,6 +139,30 @@ export function saveMySubmission(db, submission, now = new Date().toISOString())
   }
 }
 
+export function saveAnnotation(db, runId, patch = {}, now = new Date().toISOString()) {
+  const current = db.prepare("SELECT * FROM run_annotations WHERE run_id = ?").get(runId);
+  const note = patch.note !== undefined ? patch.note : current?.note ?? null;
+  const tags = patch.tags ? JSON.stringify([...new Set(patch.tags)]) : current?.custom_tags ?? "[]";
+  const conclusion = patch.conclusion ?? current?.conclusion ?? "unset";
+  const favorite = patch.isFavorite === undefined ? current?.is_favorite ?? 0 : patch.isFavorite ? 1 : 0;
+  db.prepare(`
+    INSERT INTO run_annotations(run_id, note, custom_tags, conclusion, is_favorite, updated_at)
+    VALUES(?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id) DO UPDATE SET note = excluded.note, custom_tags = excluded.custom_tags,
+      conclusion = excluded.conclusion, is_favorite = excluded.is_favorite, updated_at = excluded.updated_at
+  `).run(runId, note, tags, conclusion, favorite, now);
+  return { runId, note, tags: JSON.parse(tags), conclusion, isFavorite: favorite === 1, updatedAt: now };
+}
+
+export function saveSiteAnnotation(db, host, patch = {}) {
+  const site = db.prepare("SELECT host, note, is_favorite FROM sites WHERE host = ?").get(host);
+  if (!site) return null;
+  const note = patch.note !== undefined ? patch.note : site.note ?? null;
+  const favorite = patch.isFavorite === undefined ? site.is_favorite ?? 0 : patch.isFavorite ? 1 : 0;
+  db.prepare("UPDATE sites SET note = ?, is_favorite = ? WHERE host = ?").run(note, favorite, host);
+  return { host, note, isFavorite: favorite === 1 };
+}
+
 export function saveRunDetails(db, item, now = new Date().toISOString()) {
   if (!item?.id && !item?.runId) return false;
   const normalized = { ...item, id: String(item.id || item.runId) };

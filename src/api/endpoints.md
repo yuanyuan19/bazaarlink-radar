@@ -6,7 +6,11 @@ Origin: `https://bazaarlink.ai`。
 
 ## 本项目内部接口
 
-`POST /internal/submissions` 由镜像站在官方成功返回 `runId` 后调用，只接受 `runId`、`baseUrl`、`requestModel`、时间和非敏感分组字段。这是本机服务之间的入库入口，不校验令牌。API Key 不得发送到该接口。
+`POST /api/my-runs` 是数据站「我的检测」的提交入口：把 `baseUrl`、`apiKey`、`modelId` 转发到官方 `/api/probe/run`，立刻写入摘要，再异步补全结果。API Key 不得写入数据库或日志。
+
+`POST /internal/submissions` 仍给 CLI 在已有 `runId` 时入库，只接受 `runId`、`baseUrl`、`requestModel`、时间和非敏感分组字段。API Key 不得发送到该接口。
+
+`GET /api/runs/:id/live` 会去官方轮询进度；检测结束后再拉 `history/{id}` 补全本机记录。
 
 接口只持久化检测摘要和待补全任务，立即返回 `202`。`enrich-submissions` 命令异步读取官方 `/api/probe/history/{id}` 并补全结果，失败按持久化退避时间重试。
 

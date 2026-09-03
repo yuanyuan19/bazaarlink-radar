@@ -4,8 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { originFrom } from "../api/client.mjs";
 import { loadVerdicts, pageVerdicts, indexVerdicts, bootVerdicts } from "../api/verdicts.mjs";
-import { keyFingerprint, publishSubmission } from "../core/submissions.mjs";
-
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function readInject(name) {
@@ -40,23 +38,6 @@ function redactLine(s) {
   return String(s || "").replace(/(api[_-]?key|authorization)["']?\s*[:=]\s*["']?[^"'\s,}&]+/gi, "$1=***");
 }
 
-function submissionFromProbe(reqBody, responseBody) {
-  try {
-    const request = JSON.parse(reqBody.toString("utf8"));
-    const response = JSON.parse(responseBody.toString("utf8"));
-    const runId = response?.runId || response?.id;
-    if (!runId || !request?.baseUrl) return null;
-    return {
-      runId,
-      baseUrl: request.baseUrl,
-      requestModel: request.modelId || request.claimedModel,
-      keyFingerprint: keyFingerprint(request.apiKey, process.env.KEY_FINGERPRINT_SECRET),
-    };
-  } catch {
-    return null;
-  }
-}
-
 function rewriteHtml(html, localOrigin) {
   let out = html
     .replaceAll("https://bazaarlink.ai", localOrigin)
@@ -79,13 +60,12 @@ function shouldCache(method, urlPath) {
   return true;
 }
 
-export async function startMirror(flags, dependencies = {}) {
+export async function startMirror(flags) {
   const origin = originFrom(flags);
   const port = Number(flags.port || 8787);
   const host = String(flags.host || process.env.MIRROR_HOST || "127.0.0.1");
   const noCache = Boolean(flags.noCache);
   const localOrigin = `http://127.0.0.1:${port}`;
-  const publish = dependencies.publishSubmission || publishSubmission;
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -215,14 +195,6 @@ export async function startMirror(flags, dependencies = {}) {
       });
 
       const buf = Buffer.from(await upstream.arrayBuffer());
-      if (req.method === "POST" && url.pathname === "/api/probe/run" && upstream.ok) {
-        const submission = submissionFromProbe(reqBody, buf);
-        if (submission) {
-          publish(submission).catch((error) => {
-            process.stderr.write(`[mirror] submission capture failed run=${submission.runId}: ${error.message}\n`);
-          });
-        }
-      }
       const outHeaders = {};
       upstream.headers.forEach((v, k) => {
         if (HOP.has(k.toLowerCase())) return;
@@ -277,8 +249,6 @@ export async function startMirror(flags, dependencies = {}) {
       (err) => process.stderr.write(`[mirror] 预热失败: ${err.message}\n`),
     );
 }
-
-export { submissionFromProbe };
 
 async function warmup(origin, localOrigin, noCache) {
   if (noCache) return 0;

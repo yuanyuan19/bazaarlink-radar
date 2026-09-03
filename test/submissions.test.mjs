@@ -1,24 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { keyFingerprint, normalizeSubmission } from "../src/core/submissions.mjs";
-import { submissionFromProbe } from "../src/mirror/server.mjs";
-
-test("mirror capture produces a sanitized submission event", () => {
-  const request = Buffer.from(JSON.stringify({
-    baseUrl: "https://relay.example/v1",
-    apiKey: "sk-super-secret",
-    modelId: "anthropic/claude-opus-5",
-  }));
-  const response = Buffer.from(JSON.stringify({ runId: "run-123", status: "queued" }));
-  const event = submissionFromProbe(request, response);
-  assert.deepEqual(event, {
-    runId: "run-123",
-    baseUrl: "https://relay.example/v1",
-    requestModel: "anthropic/claude-opus-5",
-    keyFingerprint: null,
-  });
-  assert.equal(JSON.stringify(event).includes("sk-super-secret"), false);
-});
+import { buildRunBody, displayScore, liveProgress } from "../src/core/probe-run.mjs";
 
 test("submission normalization validates URLs and fingerprints keys with HMAC", () => {
   const fingerprint = keyFingerprint("sk-secret", "server-secret");
@@ -32,4 +15,27 @@ test("submission normalization validates URLs and fingerprints keys with HMAC", 
   assert.equal(normalized.keyFingerprint, fingerprint);
   assert.equal("apiKey" in normalized, false);
   assert.throws(() => normalizeSubmission({ runId: "run-2", baseUrl: "file:///tmp/key" }), /http or https/);
+});
+
+test("official run body keeps the key only for the outbound request", () => {
+  const body = buildRunBody({
+    baseUrl: "https://relay.example/v1",
+    apiKey: "sk-secret",
+    modelId: "anthropic/claude-opus-5",
+    mode: "quick",
+  });
+  assert.equal(body.quickMode, true);
+  assert.equal(body.modelId, "anthropic/claude-opus-5");
+  assert.throws(() => buildRunBody({ baseUrl: "https://relay.example/v1", modelId: "x" }), /required/);
+});
+
+test("score and live progress match the official display scale", () => {
+  assert.equal(displayScore(0.81), 81);
+  assert.equal(displayScore(81), 81);
+  assert.equal(displayScore(null), null);
+  assert.deepEqual(liveProgress({ totalProbes: 98, items: [{ passed: true }, { passed: false }, { status: "running" }] }), {
+    done: 2,
+    total: 98,
+    percent: 2,
+  });
 });

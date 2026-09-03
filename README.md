@@ -95,15 +95,13 @@ npm run platform
 
 ### 检测记录入库
 
-镜像站提交成功后会捕获官方返回的 `runId`，通过本机/Compose 内网写入“我的检测”；API Key 不会进入该事件或数据库。可选设置 `KEY_FINGERPRINT_SECRET` 来生成不可逆的 Key 关联指纹。
-
-CLI 默认直接写数据站使用的本地数据库，也可以用 `--db` 指定数据库；配置 `PLATFORM_INTERNAL_URL` 时则通过平台接口入库：
+自己的检测在数据站「我的检测」里提交，或用 CLI `run`。镜像只负责现场看官方页面，不再捕获提交。API Key 只转发到官方，不入库、不写日志。可选设置 `KEY_FINGERPRINT_SECRET` 来生成不可逆的 Key 关联指纹。
 
 ```text
 node src/cli.mjs run --base-url https://upstream.example/v1 --api-key %BL_PROBE_API_KEY% --model anthropic/claude-opus-5 --db data/cache/probe-history.sqlite
 ```
 
-新提交采用“先摘要、后详情”：提交一成功就能在“我的检测”看到，定时任务再补全判定与分数。补全任务持久化在 SQLite 中，失败会退避重试：
+新提交采用“先摘要、后详情”：提交一成功就能在“我的检测”看到，页面会轮询官方进度，定时任务也会补全判定与分数。补全任务持久化在 SQLite 中，失败会退避重试：
 
 ```text
 node src/cli.mjs enrich-submissions --db data/cache/probe-history.sqlite --limit 10
