@@ -84,7 +84,7 @@ node src/cli.mjs serve --port 8787 --db data/cache/probe-history.sqlite
 
 `serve` 启动后会：
 
-1. 跟官方页面同一节奏盯 `/api/probe/active`，有任务完成就拉 `/api/probe/history` 入库；自适应间隔轮询作兜底。
+1. 采集：看门狗每 10 分钟保底拉一次（官方窗口 100 条，这个频率下数学上不会漏）；同时跟官方页面同节奏盯 `/api/probe/active`、并在看到某次检测返回 completed 时立刻拉，让新记录几秒内进库。
 2. 周期性补全 CLI 提交的 pending run（`enrich-submissions`）。
 
 `?blperf=off` 关闭注入、只当纯代理，用来对比排障。改完注入后要强制刷新（Ctrl+F5）。细节见 `src/mirror/inject/README.md`。
@@ -103,11 +103,10 @@ node src/cli.mjs run --base-url https://upstream.example/v1 --api-key %BL_PROBE_
 node src/cli.mjs enrich-submissions --db data/cache/probe-history.sqlite --limit 10
 ```
 
-官方 `/api/probe/history` 最多返回约 100 条，不翻页、丢得快。本地按 `id` 去重攒起来，在镜像公开检测 Tab 里与官方窗口合并展示。默认每 30 分钟拉一次；如果某个窗口几乎全是新记录（可能漏了），间隔会自动降到 5 分钟，平静后再回到 30 分钟。
+官方 `/api/probe/history` 最多返回约 100 条，不翻页、丢得快。本地按 `id` 去重攒起来，作为镜像检测记录页的唯一数据源。采集在 `serve` 进程内自动进行；镜像停机超过约 2 小时可能漏掉这段时间里挤出窗口的记录，重启后会立刻补拉最近 100 条。手动补拉：
 
 ```text
-node src/cli.mjs ingest-history --once --pretty   # 拉一次
-node src/cli.mjs ingest-history                   # 常驻轮询（不必与 serve 同时开）
+node src/cli.mjs ingest-history --pretty
 ```
 
 数据库是 SQLite（WAL），存于 `data/cache/probe-history.sqlite`，已加入 gitignore。
@@ -125,7 +124,7 @@ docker compose up -d gateway mirror
 
 把 `deploy/nginx/insight.conf` 里的示例域名替换成实际域名，在 `deploy/certs` 准备好证书后再开放 HTTPS。SQLite 数据和备份留在 VPS 本地磁盘。
 
-维护任务仍可用 systemd timer（备份、清理）；采集已内置在 `mirror` 服务里，一般不必再单独跑 ingest timer。
+维护任务（备份、清理）用 `deploy/systemd/bazaarlink-maintenance.*`；采集内置在 `mirror` 服务里，没有独立的 ingest 进程。
 
 ## 给 Agent 用
 

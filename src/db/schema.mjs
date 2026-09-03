@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -109,23 +109,16 @@ const NORMALIZED_SCHEMA = `
     id INTEGER PRIMARY KEY,
     started_at TEXT NOT NULL,
     finished_at TEXT,
+    reason TEXT,
     fetched INTEGER NOT NULL DEFAULT 0,
     inserted INTEGER NOT NULL DEFAULT 0,
-    overlap INTEGER NOT NULL DEFAULT 0,
-    detail_pending INTEGER NOT NULL DEFAULT 0,
     truncated INTEGER NOT NULL DEFAULT 0,
-    missed INTEGER NOT NULL DEFAULT 0,
     error TEXT
   );
   CREATE TABLE IF NOT EXISTS ingest_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    next_poll_at TEXT,
-    lock_owner TEXT,
-    lock_expires_at TEXT,
-    current_interval_ms INTEGER NOT NULL DEFAULT 1800000,
     last_poll_at TEXT,
     last_success_at TEXT,
-    previous_window_ids TEXT,
     last_error TEXT
   );
   INSERT OR IGNORE INTO ingest_state(id) VALUES (1);
@@ -150,27 +143,19 @@ export function migrateDb(db) {
 
   const current = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version || 0;
 
-  if (current < 2) {
-    // v1 → v2：把旧 ingest_meta 里的轮询参数并入 ingest_state 后整体删除。
-    if (tableExists(db, "ingest_meta")) {
-      if (columnExists(db, "ingest_meta", "value") && !columnExists(db, "ingest_state", "last_poll_at")) {
-        db.exec("ALTER TABLE ingest_state ADD COLUMN last_poll_at TEXT");
-      }
-      db.exec(`
-        UPDATE ingest_state SET
-          current_interval_ms = COALESCE((SELECT value FROM ingest_meta WHERE key = 'interval_ms'), current_interval_ms),
-          last_poll_at = (SELECT value FROM ingest_meta WHERE key = 'last_poll_at')
-        WHERE id = 1
-      `);
-    }
-  }
-
   // Repair by shape as well as version so partially applied/restored databases converge.
-  if (!columnExists(db, "ingest_runs", "overlap")) {
-    db.exec("ALTER TABLE ingest_runs ADD COLUMN overlap INTEGER NOT NULL DEFAULT 0");
+  // v8：调度改到进程内，ingest_state 只留最近一次拉取的状态；ingest_runs 记触发原因。
+  for (const col of ["next_poll_at", "lock_owner", "lock_expires_at", "current_interval_ms", "previous_window_ids"]) {
+    if (columnExists(db, "ingest_state", col)) db.exec(`ALTER TABLE ingest_state DROP COLUMN ${col}`);
   }
-  if (!columnExists(db, "ingest_state", "previous_window_ids")) {
-    db.exec("ALTER TABLE ingest_state ADD COLUMN previous_window_ids TEXT");
+  for (const col of ["overlap", "detail_pending", "missed"]) {
+    if (columnExists(db, "ingest_runs", col)) db.exec(`ALTER TABLE ingest_runs DROP COLUMN ${col}`);
+  }
+  if (!columnExists(db, "ingest_runs", "reason")) {
+    db.exec("ALTER TABLE ingest_runs ADD COLUMN reason TEXT");
+  }
+  if (!columnExists(db, "ingest_state", "last_poll_at")) {
+    db.exec("ALTER TABLE ingest_state ADD COLUMN last_poll_at TEXT");
   }
   if (!columnExists(db, "sites", "is_favorite")) {
     db.exec("ALTER TABLE sites ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0");

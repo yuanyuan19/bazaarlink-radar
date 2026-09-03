@@ -8,7 +8,6 @@ import { migrateDb } from "../src/db/schema.mjs";
 import { rekeyRun, saveMySubmission, savePublicObservation, saveRunDetails } from "../src/db/repository.mjs";
 import { historyPage, latestIngestedAt } from "../src/db/history-query.mjs";
 import { handleHistoryRoute } from "../src/mirror/history-api.mjs";
-import { ACTIVE_BUSY_MS, ACTIVE_IDLE_MS, planActivePoll, startActiveWatch } from "../src/ingest/active-watch.mjs";
 import { officialProbeCopy } from "../src/probe/probe-copy.mjs";
 
 function openTemp(t, count, ingestedAt = "2026-09-02T00:00:00Z") {
@@ -96,39 +95,6 @@ test("handleHistoryRoute serves pages and copy", (t) => {
   const copy = handleHistoryRoute(db, new URL("http://127.0.0.1/__bl/probe-copy.json"));
   assert.equal(copy.history.histBand80, officialProbeCopy.history.histBand80);
   assert.equal(handleHistoryRoute(db, new URL("http://127.0.0.1/api/probe/history")), null);
-});
-
-test("active watch ingests when a run leaves the active list", async () => {
-  assert.deepEqual(planActivePoll(["a", "b"], ["b"]), { finished: ["a"], shouldIngest: true, delayMs: ACTIVE_BUSY_MS });
-  assert.deepEqual(planActivePoll(["a"], []), { finished: ["a"], shouldIngest: true, delayMs: ACTIVE_IDLE_MS });
-  assert.equal(planActivePoll([], ["a"]).shouldIngest, false);
-
-  const responses = [{ active: [{ runId: "a" }] }, { active: [{ runId: "a" }] }, { active: [] }];
-  const reasons = [];
-  let calls = 0;
-  await new Promise((resolve) => {
-    const stop = startActiveWatch({}, {
-      getActive: async () => {
-        calls += 1;
-        return responses[Math.min(calls - 1, responses.length - 1)];
-      },
-      ingestOnce: async () => ({ inserted: 1, fetched: 1, total: 1 }),
-      log: (line) => {
-        reasons.push(line);
-        if (reasons.length === 2) {
-          stop();
-          resolve();
-        }
-      },
-    });
-    // Speed the loop up: the first tick fires immediately, later ticks use the real delays,
-    // so drive them by hand.
-    setTimeout(() => {
-      stop();
-      resolve();
-    }, 200);
-  });
-  assert.ok(reasons[0].startsWith("ingest(startup)"));
 });
 
 test("a UUID submission is rekeyed onto the CUID once official details arrive", (t) => {

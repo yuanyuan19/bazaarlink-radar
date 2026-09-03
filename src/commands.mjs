@@ -13,7 +13,7 @@ import {
   stripKey,
   summarizeRun,
 } from "./util.mjs";
-import { ingestOnce, ingestWatch } from "./ingest/history.mjs";
+import { ingestOnce } from "./ingest/history.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { dbPathOf } from "./ingest/history.mjs";
 import { migrateDb } from "./db/schema.mjs";
@@ -410,12 +410,8 @@ export async function cmdMaintenance(flags, pos) {
 }
 
 export async function cmdIngestHistory(flags) {
-  if (flags.once) {
-    const result = await ingestOnce(flags);
-    printJson(result, flags.pretty);
-    return 0;
-  }
-  await ingestWatch(flags);
+  printJson(await ingestOnce({ ...flags, reason: "cli" }), flags.pretty);
+  return 0;
 }
 
 export async function cmdEnrichSubmissions(flags) {
@@ -485,9 +481,8 @@ export function usage() {
 维护:
   maintenance migrate|cleanup|backup [--db PATH] [--pretty]
 
-本地入库（检测纪录，按 id 去重）:
-  ingest-history --once [--pretty]
-  ingest-history [--watch] [--interval-ms 1800000]
+本地入库（检测纪录，按 id 去重；serve 进程内会自动采集，此处仅手动补拉）:
+  ingest-history [--db PATH] [--pretty]
   enrich-submissions --db PATH [--limit 10]
 
 Key 用 --api-key 或 BL_PROBE_API_KEY，不要写进仓库。`;

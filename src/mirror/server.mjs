@@ -4,8 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { originFrom } from "../api/client.mjs";
 import { loadVerdicts, pageVerdicts, indexVerdicts, bootVerdicts } from "../api/verdicts.mjs";
-import { dbPathOf, ingestOnce, openDb } from "../ingest/history.mjs";
-import { startActiveWatch } from "../ingest/active-watch.mjs";
+import { dbPathOf, openDb } from "../ingest/history.mjs";
+import { createCollector } from "../ingest/collector.mjs";
 import { enrichPendingSubmissions } from "../core/submissions.mjs";
 import { handleHistoryRoute, jsonResponse } from "./history-api.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -71,28 +71,9 @@ function shouldCache(method, urlPath) {
   return true;
 }
 
-function startBackgroundJobs(flags, dbFile) {
-  let ingestBusy = false;
+function startBackgroundJobs(flags, dbFile, collector) {
   let enrichBusy = false;
-
-  // 主路径：跟官方页面一样盯 /api/probe/active，任务一完成就拉 history 入库。
-  startActiveWatch({ ...flags, db: dbFile });
-
-  // 兜底：active 接口长期不可用时，仍按自适应间隔定期拉一次。
-  const tickIngest = async () => {
-    if (ingestBusy) return;
-    ingestBusy = true;
-    try {
-      const result = await ingestOnce({ ...flags, db: dbFile, ifDue: true });
-      if (!result.skipped && !result.reason) {
-        process.stderr.write(`[mirror] ingest(fallback) +${result.inserted}/${result.fetched} total=${result.total}\n`);
-      }
-    } catch (err) {
-      process.stderr.write(`[mirror] ingest error: ${err.message}\n`);
-    } finally {
-      ingestBusy = false;
-    }
-  };
+  collector.start();
 
   const tickEnrich = async () => {
     if (enrichBusy) return;
@@ -113,7 +94,6 @@ function startBackgroundJobs(flags, dbFile) {
 
   tickEnrich().catch(() => {});
   setInterval(() => {
-    tickIngest().catch(() => {});
     tickEnrich().catch(() => {});
   }, 60_000);
 }
@@ -126,6 +106,7 @@ export function createMirrorServer(flags = {}) {
   const localOrigin = `http://127.0.0.1:${port}`;
   const dbFile = dbPathOf(flags);
   const db = openDb(dbFile);
+  const collector = createCollector({ ...flags, db: dbFile });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -139,6 +120,7 @@ export function createMirrorServer(flags = {}) {
           records: count,
           lastSuccessfulIngestAt: state?.last_success_at || null,
           lastError: state?.last_error || null,
+          collector: collector.status(),
         }), "utf8");
         res.writeHead(200, {
           "content-type": "application/json; charset=utf-8",
@@ -157,6 +139,8 @@ export function createMirrorServer(flags = {}) {
         res.end(readInject(name));
         return;
       }
+      // 读之前让在飞的入库落地：自己刚跑完的检测，官方前端会立刻重拉列表。
+      if (url.pathname === "/__bl/history-page.json") await collector.waitForPending(3000);
       const historyPayload = handleHistoryRoute(db, url);
       if (historyPayload) {
         const out = jsonResponse(historyPayload);
@@ -285,6 +269,17 @@ export function createMirrorServer(flags = {}) {
 
       const ct = (upstream.headers.get("content-type") || "").toLowerCase();
       let body = buf;
+      const runMatch = req.method === "GET" && upstream.status === 200 && ct.includes("json")
+        ? url.pathname.match(/^\/api\/probe\/run\/([^/]+)$/)
+        : null;
+      if (runMatch) {
+        try {
+          const run = JSON.parse(buf.toString("utf8"));
+          if (run?.status === "completed") collector.notifyCompleted(decodeURIComponent(runMatch[1]));
+        } catch {
+          /* not json */
+        }
+      }
       if (ct.includes("text/html")) {
         const html = rewriteHtml(buf.toString("utf8"), localOrigin);
         body = Buffer.from(html, "utf8");
@@ -306,12 +301,12 @@ export function createMirrorServer(flags = {}) {
     }
   });
 
-  return { server, db, origin, port, host, noCache, localOrigin, dbFile };
+  return { server, db, collector, origin, port, host, noCache, localOrigin, dbFile };
 }
 
 export async function startMirror(flags) {
   const mirror = createMirrorServer(flags);
-  const { server, db, origin, port, host, noCache, localOrigin, dbFile } = mirror;
+  const { server, db, collector, origin, port, host, noCache, localOrigin, dbFile } = mirror;
 
   await new Promise((resolve, reject) => {
     server.on("error", reject);
@@ -329,7 +324,7 @@ export async function startMirror(flags) {
   const count = db.prepare("SELECT COUNT(*) AS n FROM probe_runs").get().n;
   process.stderr.write(`镜像: ${localOrigin}/probe?tab=history  ←  ${origin}\n`);
   process.stderr.write(`SQLite ${dbFile}（${count} 条）；公开检测合并本地采集 + 虚拟滚动。?blperf=off 关掉注入\n`);
-  startBackgroundJobs(flags, dbFile);
+  startBackgroundJobs(flags, dbFile, collector);
 
   loadVerdicts({ origin })
     .then((data) => {
