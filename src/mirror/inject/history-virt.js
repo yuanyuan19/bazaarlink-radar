@@ -19,6 +19,7 @@
   var debounceTimer = 0;
   var pillStyle = "";
   var pillActiveStyle = "";
+  var lastPagerHtml = "";
 
   var nativeFetch = function () {
     return (window.__blNativeFetch || window.fetch.bind(window)).apply(window, arguments);
@@ -132,19 +133,25 @@
     return arr[0] && rows[0] && arr[0].id === rows[0].id && arr[arr.length - 1].id === rows[rows.length - 1].id;
   }
 
+  function scanHooks(fiber, rows) {
+    var hook = fiber && fiber.memoizedState;
+    var hg = 0;
+    while (hook && typeof hook === "object" && hg++ < 80) {
+      if (hook.queue && typeof hook.queue.dispatch === "function" && sameRows(hook.memoizedState, rows)) {
+        return hook.queue.dispatch;
+      }
+      hook = hook.next;
+    }
+    return null;
+  }
+
   function findDispatch(rows) {
     var table = findTable();
     var fiber = fiberOf(table);
     var guard = 0;
     while (fiber && guard++ < 60) {
-      var hook = fiber.memoizedState;
-      var hg = 0;
-      while (hook && typeof hook === "object" && hg++ < 80) {
-        if (hook.queue && typeof hook.queue.dispatch === "function" && sameRows(hook.memoizedState, rows)) {
-          return hook.queue.dispatch;
-        }
-        hook = hook.next;
-      }
+      var d = scanHooks(fiber, rows) || scanHooks(fiber.alternate, rows);
+      if (d) return d;
       fiber = fiber.return;
     }
     return null;
@@ -188,7 +195,7 @@
         goTo(Number(b.getAttribute("data-bl-page")));
       });
     }
-    if (pager.nextSibling !== null || pager.previousSibling !== wrap) {
+    if (pager.parentNode !== wrap.parentNode || pager.previousSibling !== wrap) {
       if (wrap.parentNode) wrap.parentNode.insertBefore(pager, wrap.nextSibling);
     }
     pager.style.display = last.pages > 1 ? "flex" : "none";
@@ -207,7 +214,10 @@
     if (pagesToShow[pagesToShow.length - 1] < n) html += (pagesToShow[pagesToShow.length - 1] < n - 1 ? "<span>…</span>" : "") + btn(String(n), loading, n);
     html += btn("›", p >= n || loading, p + 1);
     html += '<span style="margin-left:8px">' + esc("共 " + last.total + " 条") + "</span>";
-    pager.innerHTML = html;
+    if (html !== lastPagerHtml) {
+      lastPagerHtml = html;
+      pager.innerHTML = html;
+    }
   }
 
   /* ---------- loading ---------- */
@@ -242,7 +252,9 @@
   }
 
   function goTo(page) {
-    if (!last || page < 1 || page > last.pages || page === query.page) return;
+    if (!last) return;
+    if (page < 1 || page > last.pages || page === query.page) return;
+    if (window.console && console.debug) console.debug("[bl-hist] goTo", page, "dispatch", !!dispatch);
     load({ q: query.q, band: query.band, page: page });
     var table = findTable();
     if (table && table.getBoundingClientRect().top < 0) table.scrollIntoView({ block: "start" });
@@ -284,9 +296,14 @@
   }, true);
 
   var obsTimer = 0;
-  new MutationObserver(function () {
-    clearTimeout(obsTimer);
-    obsTimer = setTimeout(renderPager, 60);
+  new MutationObserver(function (muts) {
+    for (var i = 0; i < muts.length; i++) {
+      var t = muts[i].target;
+      if (t && t.closest && t.closest("[data-bl-hist-pager]")) continue;
+      clearTimeout(obsTimer);
+      obsTimer = setTimeout(renderPager, 60);
+      return;
+    }
   }).observe(document.documentElement, { childList: true, subtree: true });
 
   ["pushState", "replaceState"].forEach(function (name) {
