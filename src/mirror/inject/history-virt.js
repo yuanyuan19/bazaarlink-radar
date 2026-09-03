@@ -19,7 +19,6 @@
   var debounceTimer = 0;
   var pillStyle = "";
   var pillActiveStyle = "";
-  var lastPagerHtml = "";
 
   var nativeFetch = function () {
     return (window.__blNativeFetch || window.fetch.bind(window)).apply(window, arguments);
@@ -101,7 +100,7 @@
     var list = pills(card);
     for (var i = 0; i < list.length; i++) {
       var st = list[i].getAttribute("style") || "";
-      var active = /background:\s*var\(--accent\)/.test(st);
+      var active = /background:\s*var\(--fg\)/.test(st);
       if (active && !pillActiveStyle) pillActiveStyle = st;
       if (!active && !pillStyle) pillStyle = st;
       if (!active) continue;
@@ -169,55 +168,98 @@
     }
   }
 
-  /* ---------- pager ---------- */
+  /* ---------- pager (styled like the official band pills / filter input) ---------- */
+
+  var PILL = "font:inherit;font-size:12px;padding:5px 12px;border-radius:999px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--fg-muted)";
+  var PILL_ON = "font:inherit;font-size:12px;padding:5px 12px;border-radius:999px;cursor:default;border:1px solid var(--fg);background:var(--fg);color:#fff";
+  var INPUT = "font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);width:56px;text-align:center";
 
   function btn(label, disabled, page) {
-    var st = pillStyle || "padding:4px 12px;border-radius:999px;border:1px solid var(--border);background:transparent;color:var(--fg);font-size:12px;cursor:pointer";
-    if (disabled) st += ";opacity:.45;cursor:default";
+    var st = pillStyle || PILL;
+    if (disabled) st += ";opacity:.4;cursor:default";
     return '<button type="button" data-bl-page="' + page + '"' + (disabled ? " disabled" : "") + ' style="' + esc(st) + '">' + esc(label) + "</button>";
+  }
+
+  function pagerHtml() {
+    var p = last.page, n = last.pages;
+    var html = btn("‹ 上一页", p <= 1 || loading, p - 1);
+    var show = [];
+    for (var i = Math.max(1, p - 2); i <= Math.min(n, p + 2); i++) show.push(i);
+    if (show[0] > 1) html += btn("1", loading, 1) + (show[0] > 2 ? '<span style="color:var(--fg-subtle)">…</span>' : "");
+    for (var j = 0; j < show.length; j++) {
+      var k = show[j];
+      html += k === p ? '<button type="button" disabled style="' + esc(pillActiveStyle || PILL_ON) + '">' + k + "</button>" : btn(String(k), loading, k);
+    }
+    if (show[show.length - 1] < n) html += (show[show.length - 1] < n - 1 ? '<span style="color:var(--fg-subtle)">…</span>' : "") + btn(String(n), loading, n);
+    html += btn("下一页 ›", p >= n || loading, p + 1);
+    html +=
+      '<span style="display:inline-flex;align-items:center;gap:6px;margin-left:auto;font-size:12px;color:var(--fg-subtle)">' +
+      esc("第 " + p + " / " + n + " 页 · 共 " + last.total + " 条") +
+      '<span style="margin-left:8px">跳到</span><input data-bl-jump type="number" min="1" max="' + n + '" placeholder="' + p + '" style="' + esc(INPUT) + '"><span>页</span></span>';
+    return html;
+  }
+
+  function makePager(pos) {
+    var pager = document.createElement("div");
+    pager.setAttribute("data-bl-hist-pager", pos);
+    pager.setAttribute("style", "display:flex;align-items:center;flex-wrap:wrap;gap:8px;" + (pos === "top" ? "margin-bottom:14px" : "margin-top:14px"));
+    pager.addEventListener("click", function (ev) {
+      var b = ev.target && ev.target.closest ? ev.target.closest("button[data-bl-page]") : null;
+      if (!b || b.disabled) return;
+      goTo(Number(b.getAttribute("data-bl-page")));
+    });
+    pager.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" || !ev.target || !ev.target.hasAttribute("data-bl-jump")) return;
+      ev.preventDefault();
+      var v = Number(ev.target.value);
+      if (v >= 1 && last && v <= last.pages) goTo(v);
+      ev.target.value = "";
+    });
+    return pager;
+  }
+
+  function placePager(pos, table, html) {
+    var pager = document.querySelector('[data-bl-hist-pager="' + pos + '"]');
+    if (!pager) pager = makePager(pos);
+    var wrap = table.parentElement || table;
+    var parent = wrap.parentNode;
+    if (!parent) return;
+    var want = pos === "top" ? wrap : wrap.nextSibling;
+    if (pager.parentNode !== parent || (pos === "top" ? pager.nextSibling !== wrap : pager.previousSibling !== wrap)) {
+      parent.insertBefore(pager, want);
+    }
+    pager.style.display = last.pages > 1 ? "flex" : "none";
+    if (pager.getAttribute("data-bl-html") !== html) {
+      pager.setAttribute("data-bl-html", html);
+      pager.innerHTML = html;
+    }
+  }
+
+  function setRunningVisibility() {
+    // Official code prepends the live "running" rows on every render; they belong to the head of the list only.
+    var st = document.querySelector("style[data-bl-hist-style]");
+    if (!st) {
+      st = document.createElement("style");
+      st.setAttribute("data-bl-hist-style", "1");
+      st.textContent = 'body[data-bl-hist-page]:not([data-bl-hist-page="1"]) table tr[data-running-row],body[data-bl-hist-page]:not([data-bl-hist-page="1"]) a[data-history-card][data-running-row]{display:none}';
+      (document.head || document.documentElement).appendChild(st);
+    }
+    document.body.setAttribute("data-bl-hist-page", String(last && historyTabActive() ? last.page : 1));
   }
 
   function renderPager() {
     var table = findTable();
-    var pager = document.querySelector("[data-bl-hist-pager]");
+    var pagers = document.querySelectorAll("[data-bl-hist-pager]");
     if (!historyTabActive() || !table || !last) {
-      if (pager) pager.style.display = "none";
+      for (var i = 0; i < pagers.length; i++) pagers[i].style.display = "none";
+      if (document.body) document.body.removeAttribute("data-bl-hist-page");
       return;
     }
-    var wrap = table.parentElement || table;
-    if (!pager) {
-      pager = document.createElement("div");
-      pager.setAttribute("data-bl-hist-pager", "1");
-      pager.setAttribute("style", "display:flex;align-items:center;justify-content:center;gap:8px;padding:14px 0 4px;font-size:12px;color:var(--fg-subtle)");
-      pager.addEventListener("click", function (ev) {
-        var b = ev.target && ev.target.closest ? ev.target.closest("button[data-bl-page]") : null;
-        if (!b || b.disabled) return;
-        goTo(Number(b.getAttribute("data-bl-page")));
-      });
-    }
-    if (pager.parentNode !== wrap.parentNode || pager.previousSibling !== wrap) {
-      if (wrap.parentNode) wrap.parentNode.insertBefore(pager, wrap.nextSibling);
-    }
-    pager.style.display = last.pages > 1 ? "flex" : "none";
-    var p = last.page, n = last.pages;
-    var html = btn("‹", p <= 1 || loading, p - 1);
-    var pagesToShow = [];
-    for (var i = Math.max(1, p - 2); i <= Math.min(n, p + 2); i++) pagesToShow.push(i);
-    if (pagesToShow[0] > 1) html += btn("1", loading, 1) + (pagesToShow[0] > 2 ? "<span>…</span>" : "");
-    for (var j = 0; j < pagesToShow.length; j++) {
-      var k = pagesToShow[j];
-      if (k === p) {
-        var act = pillActiveStyle || (pillStyle + ";background:var(--accent);color:#fff;border-color:var(--accent)");
-        html += '<button type="button" disabled style="' + esc(act) + '">' + k + "</button>";
-      } else html += btn(String(k), loading, k);
-    }
-    if (pagesToShow[pagesToShow.length - 1] < n) html += (pagesToShow[pagesToShow.length - 1] < n - 1 ? "<span>…</span>" : "") + btn(String(n), loading, n);
-    html += btn("›", p >= n || loading, p + 1);
-    html += '<span style="margin-left:8px">' + esc("共 " + last.total + " 条") + "</span>";
-    if (html !== lastPagerHtml) {
-      lastPagerHtml = html;
-      pager.innerHTML = html;
-    }
+    readBand(findCard());
+    setRunningVisibility();
+    var html = pagerHtml();
+    placePager("top", table, html);
+    placePager("bottom", table, html);
   }
 
   /* ---------- loading ---------- */
@@ -256,8 +298,8 @@
     if (page < 1 || page > last.pages || page === query.page) return;
     if (window.console && console.debug) console.debug("[bl-hist] goTo", page, "dispatch", !!dispatch);
     load({ q: query.q, band: query.band, page: page });
-    var table = findTable();
-    if (table && table.getBoundingClientRect().top < 0) table.scrollIntoView({ block: "start" });
+    var top = document.querySelector('[data-bl-hist-pager="top"]');
+    if (top && top.getBoundingClientRect().top < 0) top.scrollIntoView({ block: "start" });
   }
 
   function syncFilters() {
@@ -286,7 +328,7 @@
   }
 
   document.addEventListener("input", function (ev) {
-    if (!ev.target || ev.target.tagName !== "INPUT") return;
+    if (!ev.target || ev.target.tagName !== "INPUT" || ev.target.hasAttribute("data-bl-jump")) return;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(syncFilters, 250);
   }, true);
@@ -300,6 +342,7 @@
     for (var i = 0; i < muts.length; i++) {
       var t = muts[i].target;
       if (t && t.closest && t.closest("[data-bl-hist-pager]")) continue;
+      if (t === document.body && muts[i].type === "attributes") continue;
       clearTimeout(obsTimer);
       obsTimer = setTimeout(renderPager, 60);
       return;
