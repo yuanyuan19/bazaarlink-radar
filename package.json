@@ -1,6 +1,6 @@
 {
   "name": "bazaarlink-radar",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "BazaarLink Radar —— 基于 BazaarLink Probe 的中转站发现工具：命令行 + 本地按需加载镜像 + 数据站。",
   "type": "module",
   "bin": {

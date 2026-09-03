@@ -212,7 +212,10 @@ function registerRoutes(app, db) {
   });
 
   app.get("/api/ingest/status", async () => {
-    const state = db.prepare("SELECT * FROM ingest_state WHERE id = 1").get();
+    const state = db.prepare(`
+      SELECT next_poll_at, current_interval_ms, last_poll_at, last_success_at, last_error
+      FROM ingest_state WHERE id = 1
+    `).get();
     const recent = db.prepare("SELECT * FROM ingest_runs ORDER BY id DESC LIMIT 10").all();
     return { state, recent };
   });

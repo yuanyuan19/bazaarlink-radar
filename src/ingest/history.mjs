@@ -8,8 +8,9 @@ import { savePublicObservation } from "../db/repository.mjs";
 
 export const BASE_INTERVAL_MS = 30 * 60_000;
 export const MIN_INTERVAL_MS = 5 * 60_000;
-export const MAX_INTERVAL_MS = 30 * 60_000;
+export const MAX_INTERVAL_MS = 60 * 60_000;
 const FETCH_LIMIT = 100;
+const TARGET_OVERLAP_RATIO = 1 / 3;
 
 export function dbPathOf(flags = {}) {
   return flags.db ? path.resolve(String(flags.db)) : cachePath("probe-history.sqlite");
@@ -47,29 +48,43 @@ function releasePollLease(db, owner) {
   db.prepare("UPDATE ingest_state SET lock_owner = NULL, lock_expires_at = NULL WHERE id = 1 AND lock_owner = ?").run(owner);
 }
 
-function setStateInterval(db, next, lastPollAt) {
+function setStateInterval(db, next, lastPollAt, windowIds) {
   db.prepare(
-    "UPDATE ingest_state SET current_interval_ms = ?, next_poll_at = ?, last_poll_at = ?, last_success_at = ? WHERE id = 1",
-  ).run(next, new Date(Date.now() + next).toISOString(), lastPollAt, lastPollAt);
+    "UPDATE ingest_state SET current_interval_ms = ?, next_poll_at = ?, last_poll_at = ?, last_success_at = ?, previous_window_ids = ?, last_error = NULL WHERE id = 1",
+  ).run(next, new Date(Date.parse(lastPollAt) + next).toISOString(), lastPollAt, lastPollAt, JSON.stringify(windowIds));
 }
 
-// 根据本窗口抓到的数据量推算下一次轮询间隔。
-// 漏窗口（几乎全是新的或有缺口）→ 减到最小；数据稀少 → 放宽；否则维持。
-function nextInterval(current, { fetched, inserted, spanMs, missed, hadPrior }) {
-  let next = current;
-  const overflow = hadPrior && inserted >= Math.max(90, fetched - 5);
-  if (missed || overflow || (spanMs && spanMs < current * 0.8)) {
-    next = Math.max(MIN_INTERVAL_MS, Math.floor(current / 2));
-    if (missed || overflow) next = MIN_INTERVAL_MS;
-  } else if (inserted <= 15 && spanMs && spanMs > current * 2.5) {
-    next = Math.min(MAX_INTERVAL_MS, Math.floor(current * 1.25));
-  } else if (inserted < 40) {
-    next = Math.min(MAX_INTERVAL_MS, current + 60_000);
+export function planNextPoll({ currentIntervalMs, hadPriorWindow, previousWindowSize, windowSize, overlap, arrivals, elapsedMs }) {
+  if (!hadPriorWindow || !previousWindowSize || !windowSize) return currentIntervalMs;
+  if (arrivals <= 0) return MAX_INTERVAL_MS;
+  if (overlap <= 0) return MIN_INTERVAL_MS;
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return currentIntervalMs;
+  const targetOverlap = windowSize * TARGET_OVERLAP_RATIO;
+  const target = ((windowSize - targetOverlap) * elapsedMs) / arrivals;
+  return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, target));
+}
+
+function boundedInterval(value) {
+  return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, Number(value)));
+}
+
+function validHistoryIds(history) {
+  return [...new Set(history.filter((item) => item?.id).map((item) => String(item.id)))];
+}
+
+function readWindowIds(state) {
+  if (!state?.previous_window_ids) return [];
+  try {
+    const ids = JSON.parse(state.previous_window_ids);
+    return Array.isArray(ids) ? ids.map(String) : [];
+  } catch {
+    return [];
   }
-  return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, next));
 }
 
-export async function ingestOnce(flags = {}) {
+export async function ingestOnce(flags = {}, dependencies = {}) {
+  const fetchHistory = dependencies.getPublicHistory || getPublicHistory;
+  const now = dependencies.now || (() => Date.now());
   const file = dbPathOf(flags);
   const db = openDb(file);
   const owner = crypto.randomUUID();
@@ -80,12 +95,13 @@ export async function ingestOnce(flags = {}) {
       return { db: file, skipped: true, reason: "not_due_or_locked", nextPollAt: lease.nextPollAt };
     }
   }
-  const interval = Number(db.prepare("SELECT current_interval_ms FROM ingest_state WHERE id = 1").get().current_interval_ms);
-  const prevMax = db.prepare("SELECT MAX(created_at) AS t FROM probe_runs").get()?.t || null;
+  const state = db.prepare("SELECT current_interval_ms, last_success_at, previous_window_ids FROM ingest_state WHERE id = 1").get();
+  const interval = Number(state.current_interval_ms);
+  const previousWindowIds = readWindowIds(state);
 
   let data;
   try {
-    data = await getPublicHistory(flags, { limit: FETCH_LIMIT });
+    data = await fetchHistory(flags, { limit: FETCH_LIMIT });
   } catch (error) {
     if (flags.ifDue) releasePollLease(db, owner);
     db.prepare("UPDATE ingest_state SET last_error = ? WHERE id = 1").run(error.message);
@@ -93,68 +109,66 @@ export async function ingestOnce(flags = {}) {
     throw error;
   }
   const history = data.history;
-  const ingestedAt = new Date().toISOString();
+  const observedAt = now();
+  const ingestedAt = new Date(observedAt).toISOString();
   const startedAt = ingestedAt;
 
+  const windowIds = validHistoryIds(history);
+  const previousSet = new Set(previousWindowIds);
+  const overlap = windowIds.reduce((count, id) => count + (previousSet.has(id) ? 1 : 0), 0);
+  const arrivals = windowIds.length - overlap;
+  const hadPriorWindow = Boolean(state.last_success_at && state.previous_window_ids !== null);
   let inserted = 0;
-  db.prepare("INSERT INTO ingest_runs(started_at, fetched, truncated) VALUES(?, ?, ?)").run(startedAt, history.length, data.truncated ? 1 : 0);
-  const runId = db.prepare("SELECT last_insert_rowid() AS id").get().id;
 
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
+    db.prepare("INSERT INTO ingest_runs(started_at, fetched, overlap, truncated) VALUES(?, ?, ?, ?)").run(startedAt, windowIds.length, overlap, data.truncated ? 1 : 0);
+    const runId = db.prepare("SELECT last_insert_rowid() AS id").get().id;
     for (const item of history) {
       if (!item || !item.id) continue;
-      const saved = savePublicObservation(db, item, ingestedAt);
-      if (saved) inserted += 1;
+      const exists = db.prepare("SELECT 1 FROM probe_runs WHERE id = ?").get(String(item.id));
+      savePublicObservation(db, item, ingestedAt);
+      if (!exists) inserted += 1;
     }
+    const elapsedMs = state.last_success_at ? Date.parse(ingestedAt) - Date.parse(state.last_success_at) : null;
+    const missed = hadPriorWindow && previousWindowIds.length > 0 && windowIds.length > 0 && overlap === 0;
+    const next = flags.intervalMs ? boundedInterval(flags.intervalMs) : planNextPoll({
+      currentIntervalMs: interval,
+      hadPriorWindow,
+      previousWindowSize: previousWindowIds.length,
+      windowSize: windowIds.length,
+      overlap,
+      arrivals,
+      elapsedMs,
+    });
+    setStateInterval(db, next, ingestedAt, windowIds);
+    db.prepare(
+      "UPDATE ingest_runs SET finished_at = ?, inserted = ?, missed = ?, error = NULL WHERE id = ?",
+    ).run(ingestedAt, inserted, missed ? 1 : 0, runId);
     db.exec("COMMIT");
+
+    const total = db.prepare("SELECT COUNT(*) AS n FROM probe_runs").get().n;
+    if (flags.ifDue) releasePollLease(db, owner);
+    db.close();
+
+    return {
+      db: file,
+      fetched: windowIds.length,
+      inserted,
+      total,
+      truncated: Boolean(data.truncated),
+      overlap,
+      arrivals,
+      missed,
+      intervalMs: interval,
+      nextIntervalMs: next,
+    };
   } catch (err) {
     db.exec("ROLLBACK");
+    if (flags.ifDue) releasePollLease(db, owner);
     db.close();
     throw err;
   }
-
-  const times = history.filter((r) => Number.isFinite(Date.parse(r.createdAt))).map((r) => Date.parse(r.createdAt));
-  const newest = times.length ? Math.max(...times) : null;
-  const oldest = times.length ? Math.min(...times) : null;
-  const spanMs = newest != null && oldest != null ? newest - oldest : null;
-
-  const hadPrior = Boolean(prevMax);
-  let missed = false;
-  if (hadPrior && oldest != null) {
-    const prev = Date.parse(prevMax);
-    if (Number.isFinite(prev) && oldest > prev + 5_000 && inserted === history.length && history.length >= 90) {
-      missed = true;
-    }
-  }
-  if (hadPrior && history.length >= FETCH_LIMIT && inserted >= FETCH_LIMIT) missed = true;
-
-  const next = flags.intervalMs ? Number(flags.intervalMs) : nextInterval(interval, { fetched: history.length, inserted, spanMs, missed, hadPrior });
-  setStateInterval(db, next, ingestedAt);
-
-  db.prepare(
-    "UPDATE ingest_runs SET finished_at = ?, inserted = ?, detail_pending = 0, missed = ?, error = NULL WHERE id = ?",
-  ).run(new Date().toISOString(), inserted, missed ? 1 : 0, runId);
-
-  const total = db.prepare("SELECT COUNT(*) AS n FROM probe_runs").get().n;
-  if (flags.ifDue) releasePollLease(db, owner);
-  db.close();
-
-  return {
-    db: file,
-    fetched: history.length,
-    inserted,
-    total,
-    truncated: Boolean(data.truncated),
-    window: {
-      newest: newest ? new Date(newest).toISOString() : null,
-      oldest: oldest ? new Date(oldest).toISOString() : null,
-      spanMinutes: spanMs != null ? Math.round(spanMs / 60000) : null,
-    },
-    missed,
-    intervalMs: interval,
-    nextIntervalMs: next,
-  };
 }
 
 function sleep(ms) {
@@ -163,12 +177,12 @@ function sleep(ms) {
 
 export async function ingestWatch(flags = {}) {
   process.stderr.write(
-    `history ingest watch  db=${dbPathOf(flags)}\n默认 ${BASE_INTERVAL_MS / 60000}min，漏窗口则加快到 ${MIN_INTERVAL_MS / 60000}min\n`,
+    `history ingest watch  db=${dbPathOf(flags)}\n默认 ${BASE_INTERVAL_MS / 60000}min，目标重叠为窗口 1/3，范围 ${MIN_INTERVAL_MS / 60000}-${MAX_INTERVAL_MS / 60000}min\n`,
   );
   while (true) {
     const result = await ingestOnce(flags);
     process.stderr.write(
-      `[ingest] +${result.inserted}/${result.fetched} total=${result.total} span=${result.window.spanMinutes}min next=${Math.round(result.nextIntervalMs / 60000)}min${result.missed ? " MISS" : ""}\n`,
+      `[ingest] +${result.inserted}/${result.fetched} overlap=${result.overlap} total=${result.total} next=${Math.round(result.nextIntervalMs / 60000)}min${result.missed ? " MISS" : ""}\n`,
     );
     printJson(result, flags.pretty);
     await sleep(result.nextIntervalMs);

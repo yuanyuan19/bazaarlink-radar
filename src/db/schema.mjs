@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -99,6 +99,7 @@ const NORMALIZED_SCHEMA = `
     finished_at TEXT,
     fetched INTEGER NOT NULL DEFAULT 0,
     inserted INTEGER NOT NULL DEFAULT 0,
+    overlap INTEGER NOT NULL DEFAULT 0,
     detail_pending INTEGER NOT NULL DEFAULT 0,
     truncated INTEGER NOT NULL DEFAULT 0,
     missed INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +113,7 @@ const NORMALIZED_SCHEMA = `
     current_interval_ms INTEGER NOT NULL DEFAULT 1800000,
     last_poll_at TEXT,
     last_success_at TEXT,
+    previous_window_ids TEXT,
     last_error TEXT
   );
   INSERT OR IGNORE INTO ingest_state(id) VALUES (1);
@@ -147,6 +149,15 @@ export function migrateDb(db) {
           last_poll_at = (SELECT value FROM ingest_meta WHERE key = 'last_poll_at')
         WHERE id = 1
       `);
+    }
+  }
+
+  if (current < 3) {
+    if (!columnExists(db, "ingest_runs", "overlap")) {
+      db.exec("ALTER TABLE ingest_runs ADD COLUMN overlap INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!columnExists(db, "ingest_state", "previous_window_ids")) {
+      db.exec("ALTER TABLE ingest_state ADD COLUMN previous_window_ids TEXT");
     }
   }
 
