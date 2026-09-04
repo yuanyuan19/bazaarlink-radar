@@ -84,7 +84,7 @@ node src/cli.mjs serve --port 8787 --db data/cache/probe-history.sqlite
 
 `serve` 启动后会：
 
-1. 采集：看门狗每 10 分钟保底拉一次（官方窗口 100 条，这个频率下数学上不会漏）；同时跟官方页面同节奏盯 `/api/probe/active`、并在看到某次检测返回 completed 时立刻拉，让新记录几秒内进库。
+1. 采集：看门狗每 10 分钟保底拉一次（官方窗口 100 条，这个频率下数学上不会漏）；同时跟官方页面同节奏盯 `/api/probe/active`，让新记录几秒内进库；自己在镜像页跑完的检测由代理在返回 completed 前直接写入单条，列表里立刻可见。
 2. 周期性补全 CLI 提交的 pending run（`enrich-submissions`）。
 
 `?blperf=off` 关闭注入、只当纯代理，用来对比排障。改完注入后要强制刷新（Ctrl+F5）。细节见 `src/mirror/inject/README.md`。

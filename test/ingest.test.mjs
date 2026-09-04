@@ -86,7 +86,6 @@ function fakeCollector(overrides = {}) {
         resolveIngest = () => resolve({ inserted: 1, fetched: 1, total: 1 });
       });
     },
-    hasRun: overrides.hasRun || (() => false),
     getActive: overrides.getActive || (async () => ({ active: [] })),
   });
   return { collector, calls, timers, tick: (ms) => { clock += ms; }, finish: () => resolveIngest && resolveIngest() };
@@ -96,22 +95,12 @@ test("concurrent triggers share one in-flight ingest", async () => {
   const { collector, calls, finish } = fakeCollector();
   const a = collector.ingestNow("1 finished");
   const b = collector.ingestNow("watchdog");
-  const c = collector.notifyCompleted("run-1");
   assert.equal(a, b);
-  assert.equal(a, c);
-  const waiting = collector.waitForPending(1000);
+  assert.equal(collector.status().ingesting, true);
   finish();
-  assert.equal(await waiting, true);
   await a;
   assert.deepEqual(calls, ["1 finished"]);
-  assert.equal(await collector.waitForPending(1000), false);
-});
-
-test("notifyCompleted skips runs already in the database", async () => {
-  const { collector, calls } = fakeCollector({ hasRun: (id) => id === "known" });
-  assert.equal(await collector.notifyCompleted("known"), null);
-  collector.notifyCompleted("fresh");
-  assert.deepEqual(calls, ["completed:fresh"]);
+  assert.equal(collector.status().ingesting, false);
 });
 
 test("watchdog only fires once the last success is stale", async () => {

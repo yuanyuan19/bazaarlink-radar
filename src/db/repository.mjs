@@ -220,12 +220,12 @@ export function saveSiteAnnotation(db, host, patch = {}) {
   return { host, note, isFavorite: favorite === 1 };
 }
 
-export function saveRunDetails(db, item, now = new Date().toISOString()) {
+export function saveRunDetails(db, item, now = new Date().toISOString(), { sourceType = null } = {}) {
   if (!item?.id && !item?.runId) return false;
   const normalized = { ...item, id: String(item.id || item.runId) };
   db.exec("SAVEPOINT run_details");
   try {
-    savePublicObservation(db, normalized, now, { sourceType: null });
+    savePublicObservation(db, normalized, now, { sourceType });
     db.exec("RELEASE run_details");
   } catch (error) {
     db.exec("ROLLBACK TO run_details");

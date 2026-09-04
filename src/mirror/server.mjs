@@ -8,6 +8,7 @@ import { dbPathOf, openDb } from "../ingest/history.mjs";
 import { createCollector } from "../ingest/collector.mjs";
 import { enrichPendingSubmissions } from "../core/submissions.mjs";
 import { handleHistoryRoute, jsonResponse } from "./history-api.mjs";
+import { writeThroughCompleted } from "./write-through.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function readInject(name) {
@@ -139,8 +140,6 @@ export function createMirrorServer(flags = {}) {
         res.end(readInject(name));
         return;
       }
-      // 读之前让在飞的入库落地：自己刚跑完的检测，官方前端会立刻重拉列表。
-      if (url.pathname === "/__bl/history-page.json") await collector.waitForPending(3000);
       const historyPayload = handleHistoryRoute(db, url);
       if (historyPayload) {
         const out = jsonResponse(historyPayload);
@@ -273,12 +272,14 @@ export function createMirrorServer(flags = {}) {
         ? url.pathname.match(/^\/api\/probe\/run\/([^/]+)$/)
         : null;
       if (runMatch) {
+        let run = null;
         try {
-          const run = JSON.parse(buf.toString("utf8"));
-          if (run?.status === "completed") collector.notifyCompleted(decodeURIComponent(runMatch[1]));
+          run = JSON.parse(buf.toString("utf8"));
         } catch {
           /* not json */
         }
+        // 写穿在响应返回前完成，浏览器随后重拉的列表一定包含这一条。
+        if (run?.status === "completed") await writeThroughCompleted(db, origin, decodeURIComponent(runMatch[1]));
       }
       if (ct.includes("text/html")) {
         const html = rewriteHtml(buf.toString("utf8"), localOrigin);

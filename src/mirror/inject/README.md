@@ -16,8 +16,8 @@
 
 官方 `/api/probe/history` 最多约 100 条且不翻页。镜像在后台定时采集进 SQLite，并在 history Tab **不改一个像素**：表格完全由官方 React 代码渲染，我们只换数据、加一条翻页。
 
-1. **数据源只有本地 SQLite**。镜像进程内的采集器（`src/ingest/collector.mjs`）有两层：定时看门狗保证**完整性**——距上次成功入库超 10 分钟就拉一次，官方窗口 100 条、高峰每小时约 50 条，任意 10 分钟内拉过就不可能漏；active 差分和「代理看到 `run/{id}` 返回 completed」保证**时效**——记录完成后几秒进库。三种触发汇到同一个 `ingestNow`，同一时刻只有一次在飞。列表严格只增不减。
-2. **首屏**：官方请求 `/api/probe/history?limit=50` 被 `perf.js` 改写为 `/__bl/history-page.json?page=&q=&band=&asOf=`，纯 SQL 分页。读之前会等在飞的入库落地（上限 3s），所以自己刚跑完的检测一定在第 1 条，每项与官方接口同形（`score` 0–100、`identityOnly`、`totalProbes`），官方组件原样渲染。
+1. **数据源只有本地 SQLite**。镜像进程内的采集器（`src/ingest/collector.mjs`）有两层：定时看门狗保证**完整性**——距上次成功入库超 10 分钟就拉一次，官方窗口 100 条、高峰每小时约 50 条，任意 10 分钟内拉过就不可能漏；active 差分保证**时效**——记录完成后几秒进库。两种触发汇到同一个 `ingestNow`，同一时刻只有一次在飞。自己刚跑完的那条另走**写穿**（`src/mirror/write-through.mjs`）：代理看到 `run/{id}` 返回 completed，在把响应交给浏览器之前先拉一次 `history/{id}` 单条入库，所以官方前端随后重拉的列表一定包含它。列表严格只增不减。
+2. **首屏**：官方请求 `/api/probe/history?limit=50` 被 `perf.js` 改写为 `/__bl/history-page.json?page=&q=&band=&asOf=`，纯 SQL 分页，零等待，每项与官方接口同形（`score` 0–100、`identityOnly`、`totalProbes`），官方组件原样渲染。
 3. **快照翻页**：进入列表时记锚点 `asOf`（最新入库时刻），后续翻页都在 `ingested_at <= asOf` 的集合上进行——停多久再翻都不重不漏。锚点之后新入库的只计数，翻页条左侧出现「↻ N 条新记录」，点了才换锚点回第 1 页；页面每 15s 问一次计数。
 4. **翻页条**：只在表格下方一条；按钮样式复制官方 band pills，含上一页 / 下一页 / 页码 / 跳页输入框。页码写进 URL（`?tab=history&page=3`），刷新、后退、分享都能回到同一页。翻页时通过 React fiber 找到存放 `history` 的 state setter 直接喂入；找不到就带页码刷新。
 5. **搜索 / 分数档**：沿用官方输入框和 pills，变化后回第 1 页重查（在全集里搜）；官方自带的客户端过滤跑一遍等于空操作。

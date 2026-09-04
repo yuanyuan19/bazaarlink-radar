@@ -14,15 +14,14 @@ Origin: `https://bazaarlink.ai`。
 | GET | `/__bl/pulse-boot.json` | Pulse 首屏 |
 | GET | `/__bl/pulse-index.json` | Pulse 全量索引 |
 
-镜像进程内的采集器有三个触发源，全部汇到同一次入库（同一时刻只有一次在飞）：
+镜像进程内的采集器有两个触发源，全部汇到同一次入库（同一时刻只有一次在飞）：
 
 | 触发 | 作用 | 节奏 |
 |---|---|---|
 | 看门狗 | 完整性：距上次成功入库超 10 分钟就拉。官方窗口 100 条、高峰约 50 条/小时，任意 10 分钟内拉过就不可能漏 | 每 60s 检查 |
 | active 差分 | 时效：跟官方页面同节奏盯 `/api/probe/active`，runId 消失即拉 | 有任务 5s、空闲 10s |
-| 代理看到完成 | 时效：转发 `GET /api/probe/run/{id}` 时若 `status=completed` 且库里没有，立刻拉 | 事件 |
 
-`/__bl/history-page.json` 读之前等在飞的入库落地（上限 3s）。`/api/probe/active` 不走镜像缓存。`/__bl/health` 的 `collector` 字段暴露最近一次入库时间、原因、active 轮询是否正常。周期性执行 `enrich-submissions`。
+另有**写穿**：代理转发 `GET /api/probe/run/{id}` 时若 `status=completed` 且库里没有，先拉 `history/{id}` 单条入库（2s 超时，失败放行不重试），再把响应交给浏览器；随后的列表请求查库时记录已在。`/api/probe/active` 不走镜像缓存。`/__bl/health` 的 `collector` 字段暴露最近一次入库时间、原因、active 轮询是否正常。周期性执行 `enrich-submissions`。
 
 CLI `run` 写入的摘要直接进 SQLite（`--db PATH`），不再经过独立数据站。
 
