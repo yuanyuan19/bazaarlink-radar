@@ -22,7 +22,7 @@ export function toHistoryApiRow(row) {
     createdAt: row.created_at,
     identityConfirmed: row.identity_confirmed === 1,
     confirmedMismatch: row.confirmed_mismatch === 1,
-    mostSimilarDisplayName: row.actual_model || null,
+    mostSimilarDisplayName: row.actual_display_name || null,
     errorCount: row.error_count ?? 0,
     identityOnly: row.identity_only === 1,
     totalProbes: row.total_probes ?? undefined,
@@ -49,6 +49,7 @@ const JOINS = `
   FROM probe_runs pr
   LEFT JOIN probe_results rr ON rr.run_id = pr.id
   LEFT JOIN my_submissions ms ON ms.run_id = pr.id
+  LEFT JOIN models am ON am.id = rr.actual_model
 `;
 
 function buildWhere({ q, band }) {
@@ -90,7 +91,7 @@ export function historyPage(db, options = {}) {
   const rows = db.prepare(`
     SELECT pr.id, pr.run_uuid, pr.base_url, pr.claimed_model_id, pr.created_at,
            rr.model_id, rr.actual_model, rr.identity_confirmed, rr.confirmed_mismatch, rr.error_count,
-           rr.identity_only, rr.total_probes, ${SCORE} AS score_100, ms.request_model
+           rr.identity_only, rr.total_probes, ${SCORE} AS score_100, ms.request_model, am.display_name AS actual_display_name
     ${JOINS}
     ${snapshotWhere}
     ORDER BY pr.created_at DESC, pr.id DESC

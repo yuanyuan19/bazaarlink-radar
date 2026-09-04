@@ -18,6 +18,19 @@ function siteFor(db, item, now) {
   return db.prepare("SELECT id FROM sites WHERE host = ?").get(host).id;
 }
 
+// 官方“类别”列显示的是识别出的模型显示名（mostSimilarDisplayName），只在 v4 未弃权时有值；
+// 列表项直接带 mostSimilar*，详情只在 identityAssessment.v4.top 里。
+function recognizedModel(item) {
+  if (item.mostSimilarModelId) {
+    return { id: String(item.mostSimilarModelId), displayName: item.mostSimilarDisplayName ?? null, family: item.mostSimilarFamily ?? null };
+  }
+  const v4 = item.identityAssessment?.v4;
+  if (v4 && v4.abstained === false && v4.top?.modelId) {
+    return { id: String(v4.top.modelId), displayName: v4.top.displayName ?? null, family: v4.top.family ?? null };
+  }
+  return null;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHILD_TABLES = ["probe_results", "run_sources", "my_submissions", "run_enrichment_jobs", "run_annotations"];
 
@@ -85,8 +98,8 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
     item.completedAt ?? null, `https://bazaarlink.ai/probe?runId=${encodeURIComponent(item.id)}`, null, "history-v1", now, runUuid,
   );
 
-  const modelId = item.modelId ?? item.v4ModelId ?? item.v3fModelId ?? null;
-  if (modelId) {
+  const recognized = recognizedModel(item);
+  if (recognized) {
     db.prepare(`
       INSERT INTO models(id, display_name, family, first_seen_at, last_seen_at)
       VALUES(?, ?, ?, ?, ?)
@@ -94,7 +107,7 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
         display_name = COALESCE(excluded.display_name, models.display_name),
         family = COALESCE(excluded.family, models.family),
         last_seen_at = excluded.last_seen_at
-    `).run(modelId, item.v4DisplayName ?? item.v3fDisplayName ?? null, item.predictedFamily ?? null, now, now);
+    `).run(recognized.id, recognized.displayName, recognized.family, now, now);
   }
 
   db.prepare(`
@@ -117,8 +130,8 @@ export function savePublicObservation(db, item, now, { sourceType = "public_hist
       input_tokens = COALESCE(excluded.input_tokens, probe_results.input_tokens),
       output_tokens = COALESCE(excluded.output_tokens, probe_results.output_tokens)
   `).run(
-    String(item.id), modelId, item.v4ModelId ?? item.v3fModelId ?? null,
-    item.predictedFamily ?? item.mostSimilarFamily ?? null,
+    String(item.id), item.modelId ?? null, recognized?.id ?? null,
+    recognized?.family ?? null,
     item.confirmedMismatch ? "substitution" : item.identityConfirmed ? "match" : "unknown",
     item.score ?? null, bool01(item.identityConfirmed), bool01(item.confirmedMismatch),
     item.errorCount ?? null, item.totalInputTokens ?? null, item.totalOutputTokens ?? null,

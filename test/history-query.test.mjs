@@ -78,6 +78,32 @@ test("rows are shaped like the official history API with a 0-100 score", (t) => 
   assert.equal(historyPage(db, { q: "l.example" }).history[0].score, 86);
 });
 
+test("the category column shows the official display name, never the prefixed model id", (t) => {
+  const db = openTemp(t, 0);
+  const at = "2026-09-04T03:00:00Z";
+  // 列表项：官方直接给 mostSimilar*
+  savePublicObservation(db, {
+    id: "list1", baseUrl: "https://a.example/v1", modelId: "gpt-5.6-luna", createdAt: "2026-09-04T02:00:00Z", score: 88,
+    identityConfirmed: true, v4ModelId: "openai/gpt-5.6-luna", v4DisplayName: "GPT 5.6 Luna", v4Abstained: false,
+    mostSimilarModelId: "openai/gpt-5.6-luna", mostSimilarDisplayName: "GPT 5.6 Luna", mostSimilarFamily: "openai",
+  }, at);
+  // 列表项：v4 弃权 → 官方显示 ✓，不能回退到 v3f 的猜测
+  savePublicObservation(db, {
+    id: "list2", baseUrl: "https://b.example/v1", modelId: "anthropic/claude-sonnet-5", createdAt: "2026-09-04T01:00:00Z", score: 78,
+    identityConfirmed: false, v3fModelId: "anthropic/claude-opus-4.7", v3fDisplayName: "Claude Opus 4.7",
+    v4ModelId: null, v4DisplayName: null, v4Abstained: true, mostSimilarModelId: null, mostSimilarDisplayName: null,
+  }, at);
+  // 详情：识别结果只在 identityAssessment.v4.top
+  saveRunDetails(db, {
+    id: "det1", runId: "0feb52ad-2873-4d77-9996-1a901e4dc828", baseUrl: "https://c.example/v1", modelId: "gpt-5.6-terra",
+    createdAt: "2026-09-04T00:00:00Z", completedAt: "2026-09-04T00:02:00Z", score: 90, identityConfirmed: true,
+    identityAssessment: { v4: { abstained: false, top: { modelId: "openai/gpt-5.6-terra", displayName: "GPT 5.6 Terra", family: "openai" } } },
+  }, at, { sourceType: "public_history" });
+  const rows = historyPage(db, {}).history;
+  assert.deepEqual(rows.map((r) => [r.id, r.mostSimilarDisplayName]), [["list1", "GPT 5.6 Luna"], ["list2", null], ["det1", "GPT 5.6 Terra"]]);
+  assert.equal(db.prepare("SELECT actual_model FROM probe_results WHERE run_id = 'det1'").get().actual_model, "openai/gpt-5.6-terra");
+});
+
 test("q and band narrow the snapshot", (t) => {
   const db = openTemp(t, 20);
   assert.equal(historyPage(db, { q: "relay-7." }).total, 1);

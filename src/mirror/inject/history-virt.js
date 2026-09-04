@@ -329,12 +329,18 @@
   }
 
   // The mirror keeps SQLite live; ask it periodically whether anything newer than the anchor exists.
+  // Page 1 simply moves its snapshot forward (official code never re-fetches its list, so a finished
+  // run only shows up after a full reload); deeper pages keep their anchor so paging stays gap-free.
   function pollNewer() {
     if (!historyTabActive() || !last || loading) return;
     nativeFetch(pageUrl({ q: query.q, band: query.band, page: query.page, asOf: query.asOf }) + "&limit=1")
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data || !last) return;
+        if (data.newerCount > 0 && query.page === 1) {
+          load({ q: query.q, band: query.band, page: 1, asOf: "" });
+          return;
+        }
         if (data.newerCount !== last.newerCount) {
           last.newerCount = data.newerCount;
           renderPager();

@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 function tableExists(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
@@ -194,6 +194,13 @@ export function migrateDb(db) {
       );
       CREATE INDEX IF NOT EXISTS idx_enrichment_jobs_due ON run_enrichment_jobs(status, next_attempt_at);
     `);
+  }
+
+  // v10：v9 前 models 以“宣称模型”为键却存“识别模型”的显示名，probe_results.actual_model 在 v4 弃权时
+  // 还落了 v3f 的猜测。两处旧值都不可信，清掉；启动入库会用官方 mostSimilar* 重新填最近窗口。
+  if (current < 10) {
+    db.exec("UPDATE probe_results SET actual_model = NULL, actual_family = NULL");
+    db.exec("DELETE FROM models");
   }
 
   db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)").run(SCHEMA_VERSION, new Date().toISOString());
